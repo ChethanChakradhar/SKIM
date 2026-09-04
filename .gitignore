@@ -16,3 +16,6 @@ data/processed/*
 
 # OS
 .DS_Store
+
+# Test-generated fixture images
+tests/_tmp_capture_test/
