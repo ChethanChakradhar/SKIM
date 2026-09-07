@@ -50,6 +50,10 @@ Power BI dashboard; Gmail API integration for a personal job-application tracker
 - **Don't let him scope-creep.** A previous project (CivicWatch, a civic-alerts tool) died
   from being too ambitious. Guard against a repeat: ship a thin working slice before adding
   anything.
+- **Ask before changing dependencies or his environment.** Adding, removing or re-pinning a
+  package, or installing into `.venv`, is his call — present the tradeoff and wait. Telling
+  him while doing it is not asking. (He called this out when the Gemini SDK was swapped
+  during Step 3.) Ordinary code he asked for doesn't need this.
 
 ---
 
@@ -63,9 +67,9 @@ Photo -> preprocess -> VLM extraction -> validation -> product normalization
 1. **Capture** — phone photo or upload. *(DONE)*
 2. **Preprocess** — deskew, crop to receipt boundary, boost contrast. Moves accuracy more
    than swapping models does. *(DONE)*
-3. **Extraction** — vision-language model returns strict JSON. *(NEXT)*
+3. **Extraction** — vision-language model returns strict JSON. *(DONE)*
 4. **Validation** — do line items sum to subtotal? Does subtotal + tax = total? A free
-   accuracy signal with no labeling required. Flag failures for review.
+   accuracy signal with no labeling required. Flag failures for review. *(NEXT)*
 5. **Product normalization** — resolve `GV MLK 2% 1GAL` and `GREAT VAL MILK 2% GALLON` to
    one canonical product. **This is the hard part and the heart of the project.**
 6. **Unit normalization** — price per ounce, not price per package, or nothing is
@@ -78,7 +82,13 @@ Photo -> preprocess -> VLM extraction -> validation -> product normalization
 - **Do not train a custom model.** Fine-tuning Donut/LayoutLM is the least interesting part
   of this and general VLMs now beat it.
 - **Primary model: Gemini Flash.** Cheapest frontier vision model per image, accurate enough
-  for receipts. A few hundred receipts costs pennies.
+  for receipts. A few hundred receipts costs pennies. **Pinned to `gemini-3.6-flash`** in
+  `skim/extract.py`. Two things learned the hard way: `gemini-2.5-flash` still appears in
+  `models.list()` but returns 404 "no longer available to new users", and the newest models
+  (3.7/3.8-flash) return 503 under load. Always pin an explicit version, never the
+  `gemini-flash-latest` alias — an alias moves under you, so a benchmark run today wouldn't
+  reproduce next month and a silent model change would look like a bug in our own pipeline.
+- **SDK: `google-genai`**, not the deprecated `google-generativeai` it replaced.
 - **Baseline to beat: a purpose-built receipt API** (Veryfi, Taggun, Tabscanner, or Azure
   Document Intelligence) — for comparison only. If the whole pipeline is one API call,
   there's no project.
@@ -101,11 +111,20 @@ Photo -> preprocess -> VLM extraction -> validation -> product normalization
 - Virtual environment at `.venv/` in the project root. Activate with
   `source .venv/bin/activate` — the prompt shows `(.venv)` when active.
 - Installed: numpy, Pillow, opencv-python-headless, pillow-heif, python-dotenv,
-  google-generativeai, pytest. Pinned in `requirements.txt`.
+  google-genai, pytest. Pinned in `requirements.txt`.
 - Tests currently use stdlib `unittest` (pytest is installed and can also run them).
   Run with: `python3 -m unittest discover tests -v`
 - Secrets go in `.env` (gitignored). `.env.example` shows the shape. `GEMINI_API_KEY` is
-  **not yet obtained** — that's a task for Step 3.
+  **set and working**. Note `.env` must be created by copying `.env.example` — a fresh
+  clone has only the example, which is what makes "there's nowhere to put the key" the
+  first confusing moment for a new setup.
+- The Google SDK prints a `FutureWarning` on every import because **Python 3.9 is past end
+  of life**. Harmless today; upgrading Python is worth doing before this project grows,
+  but it is not urgent and should not derail a pipeline step.
+- Extraction tests never call the API. A test that costs money and needs a network is one
+  you stop running, and a test whose result depends on what the model felt like saying
+  can't tell you whether *your code* broke. The model is stubbed; real accuracy is measured
+  by running real photos and checking the arithmetic.
 
 ## Layout
 
@@ -113,11 +132,13 @@ Photo -> preprocess -> VLM extraction -> validation -> product normalization
 skim/            one module per pipeline stage
   capture.py     Step 1 (done)
   preprocess.py  Step 2 (done)
+  extract.py     Step 3 (done)
 data/raw/        original receipt photos (gitignored - personal data)
-data/processed/  preprocessed images (gitignored)
+data/processed/  preprocessed images + raw extraction JSON (gitignored)
 tests/
 scripts/
   preprocess_raw.py   run capture+preprocess over data/raw, write to data/processed
+  extract_receipt.py  run one photo end to end, print items, save raw JSON
 ```
 
 ---
@@ -165,8 +186,50 @@ later fails on a light surface, Otsu-as-second-attempt is the first thing to try
 Thresholds are calibrated on a sample of three. `find_receipt_corners` returns its failure
 reason so the tally, not intuition, drives the next tuning pass.
 
-**Next — Step 3: Extraction.** Gemini Flash returns strict JSON. Needs `GEMINI_API_KEY` in
-`.env` — not yet obtained, that's the first task.
+**Done — Step 3: Extraction** (`skim/extract.py`, 16 passing tests, 30 suite-wide)
+
+Sends the preprocessed photo to Gemini with `response_schema` structured output, so the API
+returns JSON conforming to `RECEIPT_SCHEMA` rather than prose containing JSON. No markdown
+fences to strip.
+
+**Result on all three real receipts: extracted correctly, arithmetic matched on all three.**
+Including the hard cases — the Walmart `** VOIDED ENTRY **` was captured with `is_voided`
+true and a null total and correctly excluded from the sum, and the faded 18-item India
+Market receipt got every weighted item right (`DESI OKRA 0.52 @ 2.49 = 1.29`). The
+uncropped hand-held photo extracted just as well as the deskewed ones, which is evidence
+that Step 2's crop failure cost nothing.
+
+The module is built around one rule: **the model transcribes, it does not interpret.**
+
+- `raw_description` is verbatim. If the model rewrote `GV MLK 2%` as `Great Value Milk`, it
+  would destroy the input Step 5 exists to work on, and do the hard part of this project
+  invisibly where it can't be audited.
+- **The model never computes what isn't printed.** If it derived the subtotal by summing the
+  items it just read, Step 4's check would compare the model against itself and pass even
+  when every price is wrong. That would destroy the only free accuracy signal we have.
+- Unreadable means null, never a guess.
+
+Two findings worth carrying forward:
+
+- **The sum check is permutation-invariant.** Dollar Tree prints the price column offset
+  half a line above its description, so an off-by-one item→price mapping is a live risk. If
+  the model shifted every price by one row, the items would still sum to the subtotal and
+  Step 4 would still say MATCH. The arithmetic validates the *multiset* of prices, not the
+  mapping — and for a personal price index, the mapping is the entire point. Step 4 should
+  not be trusted as a complete accuracy measure.
+- **Weighted items come back with `unit` null** when the receipt prints `0.52 @ 2.49` with
+  no unit label, which is correct behavior (never guess). Step 6 must infer pounds from
+  context — a US grocery receipt with fractional produce quantities — and that inference
+  belongs in the normalization layer where it's auditable, not smuggled into extraction.
+
+Observed token usage per receipt: ~1,700 input, 700–2,100 output, and **1,500–2,700 thinking
+tokens** — thinking often exceeds output, so it's the biggest cost lever available. Worth an
+A/B once Step 4 can score accuracy. Current per-receipt cost in dollars is not yet
+calculated; look up gemini-3.6-flash pricing before quoting a number.
+
+**Next — Step 4: Validation.** Do the line items sum to the printed subtotal? Does
+subtotal + tax = total? Flag failures for review. Read the permutation-invariance caveat
+above before treating a MATCH as proof of correctness.
 
 Keep showing before/after images at each stage so Chethan can see each operation doing its
 job rather than taking it on trust. Step 2's stage-by-stage review page:

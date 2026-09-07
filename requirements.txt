@@ -8,7 +8,9 @@ pillow-heif==0.18.0      # HEIC support for iPhone photos
 python-dotenv==1.0.1
 
 # VLM extraction (Step 3)
-google-generativeai==0.8.3
+# google-genai is the current SDK. The older `google-generativeai` package
+# it replaced is deprecated and gets no new model support -- don't go back.
+google-genai==1.47.0
 
 # Testing
 pytest==8.3.3
