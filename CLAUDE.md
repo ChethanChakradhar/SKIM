@@ -82,7 +82,7 @@ Photo -> preprocess -> VLM extraction -> validation -> product normalization
 - **Do not train a custom model.** Fine-tuning Donut/LayoutLM is the least interesting part
   of this and general VLMs now beat it.
 - **Primary model: Gemini Flash.** Cheapest frontier vision model per image, accurate enough
-  for receipts. A few hundred receipts costs pennies. **Pinned to `gemini-3.6-flash`** in
+  for receipts. **Pinned to `gemini-3.6-flash`** in
   `skim/extract.py`. Two things learned the hard way: `gemini-2.5-flash` still appears in
   `models.list()` but returns 404 "no longer available to new users", and the newest models
   (3.7/3.8-flash) return 503 under load. Always pin an explicit version, never the
@@ -222,10 +222,42 @@ Two findings worth carrying forward:
   context — a US grocery receipt with fractional produce quantities — and that inference
   belongs in the normalization layer where it's auditable, not smuggled into extraction.
 
-Observed token usage per receipt: ~1,700 input, 700–2,100 output, and **1,500–2,700 thinking
-tokens** — thinking often exceeds output, so it's the biggest cost lever available. Worth an
-A/B once Step 4 can score accuracy. Current per-receipt cost in dollars is not yet
-calculated; look up gemini-3.6-flash pricing before quoting a number.
+### Measured cost (looked up Sept 2026, verify before quoting)
+
+`gemini-3.6-flash` is $0.75/1M input and $3.75/1M output, promotional through Dec 31 2026,
+**doubling to $1.50/$7.50 on Jan 1 2027**. Thinking tokens bill as output.
+
+| Receipt | in | out | thinking | cost | thinking share |
+|---|---|---|---|---|---|
+| Dollar Tree | 1,695 | 696 | 1,571 | $0.0098 | 60% |
+| Walmart | 1,685 | 852 | 2,744 | $0.0147 | 70% |
+| India Market | 1,673 | 2,144 | 2,411 | $0.0183 | 49% |
+
+**~$0.014 per receipt**, so 100/month ≈ $1.43, doubling in 2027. The earlier "a few hundred
+receipts costs pennies" claim was wrong — 500 receipts is about $7.
+
+**Thinking tokens are half to two-thirds of the bill.** That is the single biggest cost
+lever and it is untested: nobody has checked whether receipt transcription actually needs
+reasoning tokens. Test `thinking_budget=0` against the arithmetic check once Step 4 exists.
+
+Cheaper models worth A/B-ing at that same point (same token counts, list price):
+`gemini-3.1-flash-lite` ≈ $0.0056/receipt (2.5x cheaper), `gemini-2.5-flash-lite` ≈
+$0.0016 (9x cheaper). Do not switch on price alone — a lite model that misreads one digit
+of a price silently corrupts the index, which costs far more than a cent saved.
+
+### Privacy: use the paid tier, not the free tier
+
+Google's API terms say that on the **unpaid tier, human reviewers may read and annotate API
+input and output**, and that content is used for product improvement. The terms state
+plainly: *"Do not submit sensitive, confidential, or personal information to the Unpaid
+Services."* On the **paid tier** Google does not use prompts or responses (including
+uploaded images) to improve its products; content is retained ~30 days only for abuse
+detection.
+
+Receipts are personal data — where Chethan shops, when, how often, what he eats, what he
+pays with. Enabling billing is the correct call and costs ~$1.43/month at 100 receipts.
+This is also a good thing to be able to explain in an interview: knowing *why* the tier
+matters for personal data is a data-governance signal, not just a billing detail.
 
 **Next — Step 4: Validation.** Do the line items sum to the printed subtotal? Does
 subtotal + tax = total? Flag failures for review. Read the permutation-invariance caveat
