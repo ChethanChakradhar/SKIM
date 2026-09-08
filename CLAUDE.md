@@ -259,6 +259,16 @@ pays with. Enabling billing is the correct call and costs ~$1.43/month at 100 re
 This is also a good thing to be able to explain in an interview: knowing *why* the tier
 matters for personal data is a data-governance signal, not just a billing detail.
 
+**Status: the key is on the FREE tier** (as of Sept 2026 — no billing account linked, which
+is why nothing has been charged). The three test receipts were sent under free-tier terms.
+Chethan should link billing before running a real backlog through.
+
+**Do not misread `x-gemini-service-tier` as the billing tier.** That response header reports
+the *processing* class — standard / flex / priority / batch — and returns "standard" by
+default regardless of whether the account pays. Billing tier is account-level and is only
+visible in the console at https://aistudio.google.com/apikey. This mistake was made once in
+this project already; the header looks authoritative and isn't.
+
 **Next — Step 4: Validation.** Do the line items sum to the printed subtotal? Does
 subtotal + tax = total? Flag failures for review. Read the permutation-invariance caveat
 above before treating a MATCH as proof of correctness.
