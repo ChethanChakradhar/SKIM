@@ -129,6 +129,43 @@ class RetryPolicyTests(unittest.TestCase):
         self._call(client)
         self.assertEqual(self.sleep.call_args_list[0].args[0], 2.0)
 
+    def test_daily_quota_fails_immediately_instead_of_retrying(self):
+        # Per-minute and per-day quotas both arrive as 429 with a stated
+        # retryDelay, and need opposite responses. Waiting 58s does not
+        # restore a day's allowance, so retrying burns three minutes to
+        # fail anyway and reports it as something transient.
+        daily = genai_errors.ClientError(429, {"error": {
+            "message": "Quota exceeded. Please retry in 58.9s",
+            "details": [{
+                "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                "violations": [{
+                    "quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier",
+                    "quotaValue": "20",
+                }],
+            }],
+        }})
+        client = FakeClient([daily, "the response"])
+        with self.assertRaises(ex.DailyQuotaExhaustedError):
+            self._call(client)
+        self.assertEqual(client.models.calls, 1)
+        self.sleep.assert_not_called()
+
+    def test_per_minute_quota_is_still_retried(self):
+        # The distinction is the quotaId, not the status code.
+        per_minute = genai_errors.ClientError(429, {"error": {
+            "message": "Quota exceeded. Please retry in 39.4s",
+            "details": [{
+                "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                "violations": [{
+                    "quotaId": "GenerateRequestsPerMinutePerProjectPerModel-FreeTier",
+                    "quotaValue": "5",
+                }],
+            }],
+        }})
+        client = FakeClient([per_minute, "the response"])
+        self.assertEqual(self._call(client), "the response")
+        self.assertEqual(client.models.calls, 2)
+
     def test_connection_reset_is_retried(self):
         # A transport failure never reaches the API layer and so has no
         # status code to inspect. An earlier version of the retry policy

@@ -59,11 +59,24 @@ class CoerceTests(unittest.TestCase):
         self.assertIsNone(p.size_value)
         self.assertIsNone(p.size_unit)
 
-    def test_unknown_category_falls_back_to_other(self):
-        # Grouping degrades gracefully; it must not fragment into a new
-        # category per item.
-        p = nz._coerce(payload(category="refrigerated dairy goods"), "X", attempts=1)
-        self.assertEqual(p.category, "other")
+    def test_an_unseen_category_is_kept_not_flattened(self):
+        # A headset is electronics. Forcing it to "other" -- which an
+        # earlier fixed list did -- throws away real information about
+        # what gets bought, and is how the field became useless for
+        # Step 8's "which parts of my basket are inflating".
+        p = nz._coerce(payload(category="Electronics"), "HEADSET", attempts=1)
+        self.assertEqual(p.category, "electronics")
+
+    def test_known_synonyms_fold_together(self):
+        # The open-vocabulary risk is four names for one idea across
+        # four receipts, discovered months later when a chart is wrong.
+        for variant in ("Dairy", "dairy products", "REFRIGERATED DAIRY"):
+            p = nz._coerce(payload(category=variant), "X", attempts=1)
+            self.assertEqual(p.category, "dairy")
+
+    def test_category_casing_and_spacing_are_normalized(self):
+        p = nz._coerce(payload(category="Personal Care"), "X", attempts=1)
+        self.assertEqual(p.category, "personal_care")
 
     def test_missing_product_forces_review_even_if_model_says_otherwise(self):
         # The model claiming success with nothing to match on is not
@@ -170,12 +183,38 @@ class VocabularyTests(unittest.TestCase):
         for unit in ("lb", "oz", "g", "gal", "each", "ct"):
             self.assertIn(unit, nz.KNOWN_UNITS)
 
-    def test_category_list_stays_coarse(self):
-        # It exists to answer "produce inflation vs household
-        # inflation", not to be a taxonomy. If this grows past ~20,
-        # grouping stops being useful.
-        self.assertLess(len(nz.KNOWN_CATEGORIES), 20)
-        self.assertIn("other", nz.KNOWN_CATEGORIES)
+    def test_a_new_category_is_remembered(self):
+        vocab = nz.CategoryVocabulary()
+        self.assertTrue(vocab.is_new("electronics"))
+        self.assertEqual(vocab.add("Electronics"), "electronics")
+        self.assertFalse(vocab.is_new("ELECTRONICS"))
+
+    def test_the_vocabulary_is_offered_back_to_the_model(self):
+        # This is what keeps an open vocabulary stable: the second
+        # phone charger joins "electronics" instead of founding
+        # "consumer electronics". Without it, growth means fragmentation.
+        vocab = nz.CategoryVocabulary()
+        vocab.add("electronics")
+        listed = vocab.as_prompt_list()
+        self.assertIn("electronics", listed)
+        self.assertIn("produce", listed)
+
+    def test_vocabulary_survives_a_restart(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "vocab.json"
+            nz.CategoryVocabulary(path).add("electronics")
+            # A cache restored without its vocabulary would start
+            # re-inventing names for products it had already grouped.
+            self.assertFalse(nz.CategoryVocabulary(path).is_new("electronics"))
+
+    def test_seed_categories_are_a_starting_point_not_a_ceiling(self):
+        vocab = nz.CategoryVocabulary()
+        before = len(vocab.categories)
+        vocab.add("stationery")
+        vocab.add("clothing")
+        self.assertEqual(len(vocab.categories), before + 2)
 
 
 if __name__ == "__main__":

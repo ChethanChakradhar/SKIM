@@ -122,6 +122,10 @@ class ModelUnavailableError(ExtractionError):
     """The model stayed overloaded or rate-limited across every attempt."""
 
 
+class DailyQuotaExhaustedError(ExtractionError):
+    """The per-day request allowance is spent. Waiting will not help."""
+
+
 @dataclass
 class LineItem:
     """One printed line on the receipt.
@@ -319,6 +323,31 @@ def _image_to_jpeg_bytes(result: PreprocessResult) -> bytes:
     return buffer.getvalue()
 
 
+def _is_daily_quota(error: Exception) -> bool:
+    """Is this a per-DAY allowance rather than a per-minute rate limit?
+
+    Both arrive as 429 and both state a retryDelay, but they need
+    opposite responses. A per-minute quota resets while we wait, so
+    waiting is exactly right. A per-day quota does not -- the stated
+    "retry in 58s" is the throttle interval, not the time until the
+    day's allowance returns, so retrying burns minutes to fail three
+    times and then reports something misleadingly transient.
+
+    The two are distinguishable only by the quotaId, which names its own
+    window: GenerateRequestsPerDayPerProjectPerModel vs
+    GenerateRequestsPerMinutePerProjectPerModel.
+    """
+    details = getattr(error, "details", None) or {}
+    if isinstance(details, dict):
+        for detail in details.get("error", {}).get("details", []) or []:
+            if not isinstance(detail, dict):
+                continue
+            for violation in detail.get("violations", []) or []:
+                if "PerDay" in str(violation.get("quotaId", "")):
+                    return True
+    return "PerDay" in str(error)
+
+
 def _server_requested_wait(error: Exception) -> Optional[float]:
     """How long the server asked us to wait, if it said.
 
@@ -382,6 +411,17 @@ def _generate_with_retry(
         except (genai_errors.ServerError, genai_errors.ClientError) as e:
             if getattr(e, "code", None) not in RETRYABLE_STATUS_CODES:
                 raise  # permanent -- fail now, with the real reason
+            if _is_daily_quota(e):
+                # Not transient in any useful sense. Fail immediately
+                # rather than spending three minutes proving it: the
+                # same "fail fast and cheaply" rule capture() follows.
+                raise DailyQuotaExhaustedError(
+                    f"The daily free-tier request allowance for {model} is spent. "
+                    "Waiting will not restore it -- it resets on Google's clock. "
+                    "Either link a billing account at "
+                    "https://aistudio.google.com/apikey, or set GEMINI_MODEL to a "
+                    "different model, since the quota is counted per model."
+                ) from e
             last_error = e
             if attempt >= MAX_ATTEMPTS - 1:
                 break

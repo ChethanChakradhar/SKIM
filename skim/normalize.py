@@ -39,6 +39,7 @@ nothing and quietly corrupts the index forever.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -70,14 +71,104 @@ KNOWN_UNITS = {
 # list was short. Expect this list to grow the same way -- from real
 # receipts, not from imagination.
 
-# Kept deliberately coarse. These exist for Step 8 ("what is my produce
-# inflation vs household inflation"), not to build a taxonomy. A short
-# fixed list also stops the model inventing a new category per item,
-# which would make grouping useless.
-KNOWN_CATEGORIES = {
+# Starting points, NOT a closed list. Categories grow from what the
+# receipts actually contain.
+#
+# The first version of this was a fixed set of fourteen, and real data
+# killed it immediately: MINI SKETCHBOOK 4X4 80SH had nowhere to go but
+# "other", and so would a tank top, a headset, a phone charger. A field
+# where a third of the rows say "other" cannot answer Step 8's question
+# about which parts of a basket are inflating.
+#
+# The opposite extreme fails differently and less visibly. Left entirely
+# free, a model will emit "dairy", "Dairy", "dairy products" and
+# "refrigerated dairy" across four receipts -- four groups in a time
+# series that was meant to have one, discovered months later when a
+# chart looks wrong.
+#
+# So: the model may propose any category, and every category it proposes
+# is remembered and offered back to it on the next call. New content
+# extends the vocabulary; existing vocabulary keeps it stable.
+SEED_CATEGORIES = {
     "produce", "dairy", "meat", "seafood", "bakery", "pantry", "frozen",
-    "beverage", "snack", "household", "personal_care", "pet", "baby", "other",
+    "beverage", "snack", "household", "personal_care", "pet", "baby",
 }
+
+# Variants seen in real output that mean something already in the
+# vocabulary. Add to this from observed drift, never speculatively --
+# the same rule KNOWN_UNITS follows.
+CATEGORY_ALIASES = {
+    "dairy_products": "dairy",
+    "refrigerated_dairy": "dairy",
+    "fruits": "produce",
+    "vegetables": "produce",
+    "fruit": "produce",
+    "vegetable": "produce",
+    "groceries": "pantry",
+    "grocery": "pantry",
+    "cleaning": "household",
+    "cleaning_supplies": "household",
+    "home": "household",
+    "toiletries": "personal_care",
+    "health_and_beauty": "personal_care",
+}
+
+
+def normalize_category(raw: Optional[str]) -> Optional[str]:
+    """Fold a proposed category into a stable key.
+
+    Cheap, deterministic tidying only -- case, spacing, punctuation, and
+    a small table of observed synonyms. Deliberately does NOT try to
+    singularize: "electronics" would become "electronic", which is worse
+    than the problem it solves. Consistency comes mainly from showing
+    the model the vocabulary it has already used, not from string
+    surgery here.
+    """
+    if not raw:
+        return None
+    key = raw.strip().lower().replace("&", "and")
+    key = re.sub(r"[\s/\-]+", "_", key)
+    key = re.sub(r"[^a-z0-9_]", "", key).strip("_")
+    if not key:
+        return None
+    return CATEGORY_ALIASES.get(key, key)
+
+
+class CategoryVocabulary:
+    """The set of categories seen so far, persisted between runs.
+
+    This is what makes an open vocabulary safe: the model is free to
+    name something new, but it is shown everything it has already named,
+    so the second phone charger joins "electronics" rather than founding
+    "consumer electronics".
+    """
+
+    def __init__(self, path: Optional[Path] = None):
+        self.path = path
+        self.categories = set(SEED_CATEGORIES)
+        if path and path.exists():
+            self.categories |= set(json.loads(path.read_text()))
+
+    def add(self, category: Optional[str]) -> Optional[str]:
+        """Record a category and return its normalized form."""
+        key = normalize_category(category)
+        if key and key not in self.categories:
+            self.categories.add(key)
+            self._save()
+        return key
+
+    def is_new(self, category: Optional[str]) -> bool:
+        key = normalize_category(category)
+        return bool(key) and key not in self.categories
+
+    def as_prompt_list(self) -> str:
+        return ", ".join(sorted(self.categories))
+
+    def _save(self) -> None:
+        if not self.path:
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps(sorted(self.categories), indent=2))
 
 
 class ParseError(ExtractionError):
@@ -160,9 +251,15 @@ FIELDS
   units -- report what is printed. "310 GM" is 310 g, not 10.9 oz.
 - `pack_count`: how many packages, if the description says so
   ("2-PACK", "4-CUP" is a size not a pack). Null otherwise.
-- `category`: exactly one of: produce, dairy, meat, seafood, bakery,
-  pantry, frozen, beverage, snack, household, personal_care, pet, baby,
-  other.
+- `category`: what kind of thing this is. Prefer one of the categories
+  already in use, listed below, so that the same kind of product always
+  lands in the same group. If none of them genuinely fits, name a new
+  one -- a headset is "electronics", a tank top is "clothing". Do not
+  force an item into a category it does not belong to, and do not fall
+  back on "other" when a real category exists. Use a single lowercase
+  word or two words joined by an underscore.
+
+  Categories already in use: {categories}
 - `canonical_text`: a short natural phrase combining brand, product,
   variant and size, in that order, lowercase except brand names:
   "Great Value milk 2% 1 gallon", "boneless chicken breast".
@@ -199,7 +296,12 @@ unknown.
 """
 
 
-def _coerce(payload: Dict[str, Any], raw_description: str, attempts: int) -> ParsedProduct:
+def _coerce(
+    payload: Dict[str, Any],
+    raw_description: str,
+    attempts: int,
+    vocabulary: Optional[CategoryVocabulary] = None,
+) -> ParsedProduct:
     """Turn the model's JSON into a ParsedProduct, discarding values we
     can't stand behind.
 
@@ -213,9 +315,15 @@ def _coerce(payload: Dict[str, Any], raw_description: str, attempts: int) -> Par
     if unit and unit not in KNOWN_UNITS:
         unit = None
 
-    category = (payload.get("category") or "").strip().lower() or None
-    if category and category not in KNOWN_CATEGORIES:
-        category = "other"
+    # An unrecognized category is kept, not flattened to "other". A
+    # category we have not seen before is new information about what
+    # gets bought -- discarding it is how the field became useless.
+    # Recording it in the vocabulary is what stops the next headset
+    # inventing a second word for the same idea.
+    category = (
+        vocabulary.add(payload.get("category")) if vocabulary
+        else normalize_category(payload.get("category"))
+    )
 
     size = payload.get("size_value")
     # A size without a usable unit is not a size. Keeping the number
@@ -271,6 +379,7 @@ def parse_product(
     sibling_descriptions: Optional[List[str]] = None,
     model: str = GEMINI_MODEL,
     client: Optional[genai.Client] = None,
+    vocabulary: Optional[CategoryVocabulary] = None,
 ) -> ParsedProduct:
     """Decode one receipt string into a structured product.
 
@@ -290,9 +399,15 @@ def parse_product(
     pressure.
     """
     client = client or _load_client()
-    base_prompt = f'{PROMPT}\nReceipt description to decode: "{raw_description}"'
+    vocabulary = vocabulary if vocabulary is not None else CategoryVocabulary()
+    base_prompt = (
+        PROMPT.format(categories=vocabulary.as_prompt_list())
+        + f'\nReceipt description to decode: "{raw_description}"'
+    )
 
-    parsed = _coerce(_ask(client, base_prompt, model), raw_description, attempts=1)
+    parsed = _coerce(
+        _ask(client, base_prompt, model), raw_description, 1, vocabulary
+    )
     if parsed.is_identified:
         return parsed
 
@@ -308,7 +423,7 @@ def parse_product(
         siblings="\n".join(f"    - {d}" for d in others[:20]) or "    (none)",
     )
     retried = _coerce(
-        _ask(client, base_prompt + context, model), raw_description, attempts=2
+        _ask(client, base_prompt + context, model), raw_description, 2, vocabulary
     )
 
     # Only take the retry if it actually resolved something. A second
@@ -344,11 +459,18 @@ class ProductCache:
     quota makes routine -- keeps everything it had already paid for.
     """
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, vocabulary: Optional[CategoryVocabulary] = None):
         self.path = path
         self.entries: Dict[str, Dict[str, Any]] = {}
         if path.exists():
             self.entries = json.loads(path.read_text())
+        # The vocabulary lives beside the cache and grows with it: both
+        # are the accumulated memory of what has been seen, and a cache
+        # restored without its vocabulary would start re-inventing
+        # category names for products it had already categorized.
+        self.vocabulary = vocabulary or CategoryVocabulary(
+            path.with_name("category_vocabulary.json")
+        )
 
     @staticmethod
     def key(store: Optional[str], raw_description: str) -> str:
@@ -382,7 +504,8 @@ class ProductCache:
 
         parsed = parse_product(
             raw_description, store=store,
-            sibling_descriptions=sibling_descriptions, **kwargs
+            sibling_descriptions=sibling_descriptions,
+            vocabulary=self.vocabulary, **kwargs
         )
         self.put(store, parsed)
         return parsed
