@@ -96,6 +96,58 @@ class RetryPolicyTests(unittest.TestCase):
         waits = [call.args[0] for call in self.sleep.call_args_list]
         self.assertEqual(waits, [2.0, 4.0])
 
+    def test_quota_error_honors_the_delay_the_server_states(self):
+        # A real 429 from the free tier: "limit: 5 per minute, please
+        # retry in 39.4s". Our own 2s guess is wrong by an order of
+        # magnitude against a per-minute quota, so we do as we are told
+        # (plus a second of slack, since sleeping exactly to the
+        # boundary tends to fail again).
+        quota = genai_errors.ClientError(429, {"error": {
+            "message": "Quota exceeded for metric: ... Please retry in 39.4s",
+            "details": [{"@type": "type.googleapis.com/google.rpc.RetryInfo",
+                         "retryDelay": "39s"}],
+        }})
+        client = FakeClient([quota, "the response"])
+        self.assertEqual(self._call(client), "the response")
+        self.assertEqual(self.sleep.call_args_list[0].args[0], 40.0)
+
+    def test_a_server_delay_is_capped(self):
+        # We are sleeping inside a synchronous call. A server asking for
+        # ten minutes is a signal to stop and tell the user, not to hang.
+        quota = genai_errors.ClientError(429, {"error": {
+            "message": "Please retry in 600.0s"}})
+        client = FakeClient([quota, "the response"])
+        self._call(client)
+        self.assertEqual(
+            self.sleep.call_args_list[0].args[0],
+            ex.MAX_SERVER_REQUESTED_WAIT_SECONDS,
+        )
+
+    def test_overload_without_a_stated_delay_still_uses_exponential_backoff(self):
+        # 503 means nobody knows how long, so the guess is all we have.
+        client = FakeClient([server_error(503), "the response"])
+        self._call(client)
+        self.assertEqual(self.sleep.call_args_list[0].args[0], 2.0)
+
+    def test_connection_reset_is_retried(self):
+        # A transport failure never reaches the API layer and so has no
+        # status code to inspect. An earlier version of the retry policy
+        # only caught API errors, and one connection reset killed a
+        # 35-item batch on its very first call.
+        import httpx
+        client = FakeClient([
+            httpx.ReadError("[Errno 54] Connection reset by peer"),
+            "the response",
+        ])
+        self.assertEqual(self._call(client), "the response")
+        self.assertEqual(client.models.calls, 2)
+
+    def test_sustained_connection_failure_raises_a_readable_error(self):
+        import httpx
+        client = FakeClient([httpx.ConnectError("no route to host")] * ex.MAX_ATTEMPTS)
+        with self.assertRaises(ex.ModelUnavailableError):
+            self._call(client)
+
 
 class ParseReceiptTests(unittest.TestCase):
     def payload(self, **overrides):

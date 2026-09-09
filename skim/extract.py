@@ -41,10 +41,12 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+import httpx
 from dotenv import load_dotenv
 from google import genai
 from google.genai import errors as genai_errors
@@ -86,6 +88,18 @@ WIRE_JPEG_QUALITY = 90
 MAX_ATTEMPTS = 3
 RETRY_BASE_DELAY_SECONDS = 2.0
 RETRYABLE_STATUS_CODES = {429, 503}
+
+# A 429 quota error carries the answer with it: the response says how
+# long until the window resets ("Please retry in 39.4s", and a
+# RetryInfo.retryDelay field). Our own exponential guess of 2s then 4s
+# is wrong by an order of magnitude against a per-minute quota, so when
+# the server states a delay we honor it instead of guessing.
+#
+# Capped, because we are waiting inside a synchronous call and a server
+# asking us to sleep for ten minutes is a signal to stop and tell the
+# user, not to hang.
+MAX_SERVER_REQUESTED_WAIT_SECONDS = 75.0
+_RETRY_DELAY_PATTERN = re.compile(r"retry in ([0-9.]+)s", re.IGNORECASE)
 
 
 class ExtractionError(Exception):
@@ -305,18 +319,43 @@ def _image_to_jpeg_bytes(result: PreprocessResult) -> bytes:
     return buffer.getvalue()
 
 
+def _server_requested_wait(error: Exception) -> Optional[float]:
+    """How long the server asked us to wait, if it said.
+
+    A quota error states its own reset window, which is strictly better
+    information than any backoff curve we could invent. Read from the
+    structured RetryInfo detail when present, and fall back to the
+    human-readable message, which carries the same number.
+    """
+    details = getattr(error, "details", None) or {}
+    if isinstance(details, dict):
+        for detail in details.get("error", {}).get("details", []) or []:
+            delay = detail.get("retryDelay") if isinstance(detail, dict) else None
+            if isinstance(delay, str) and delay.endswith("s"):
+                try:
+                    return float(delay[:-1])
+                except ValueError:
+                    pass
+
+    match = _RETRY_DELAY_PATTERN.search(str(error))
+    return float(match.group(1)) if match else None
+
+
 def _generate_with_retry(
     client: genai.Client,
     model: str,
     contents: List[Any],
     config: types.GenerateContentConfig,
 ) -> types.GenerateContentResponse:
-    """Call the API, retrying transient overload with exponential backoff.
+    """Call the API, retrying transient failures.
 
-    Backoff doubles between attempts (2s, then 4s) rather than retrying
-    immediately: an overloaded model is usually still overloaded a
-    millisecond later, and hammering it makes the queue worse for
-    everyone, including us.
+    Two different waits, because they are two different problems. A 503
+    means the model is momentarily overloaded and nobody knows for how
+    long, so we back off exponentially (2s, then 4s) rather than
+    hammering a queue we are already contributing to. A 429 means we hit
+    a quota with a known reset window, and the response says exactly how
+    long it is -- guessing 2 seconds against a per-minute quota is wrong
+    by an order of magnitude, so we do what we are told.
     """
     last_error: Optional[Exception] = None
 
@@ -325,12 +364,36 @@ def _generate_with_retry(
             return client.models.generate_content(
                 model=model, contents=contents, config=config
             )
+        except httpx.TransportError as e:
+            # The connection failed before any HTTP status existed --
+            # reset by peer, DNS hiccup, read timeout. These never reach
+            # the API layer, so the status-code check below cannot see
+            # them, and an earlier version of this function let them
+            # through untouched: a single connection reset killed a
+            # 35-item batch on its first call.
+            #
+            # httpx is not a dependency we chose; google-genai requires
+            # it and makes its calls through it, so it is guaranteed
+            # present wherever this module runs.
+            last_error = e
+            if attempt >= MAX_ATTEMPTS - 1:
+                break
+            time.sleep(RETRY_BASE_DELAY_SECONDS * (2 ** attempt))
         except (genai_errors.ServerError, genai_errors.ClientError) as e:
             if getattr(e, "code", None) not in RETRYABLE_STATUS_CODES:
                 raise  # permanent -- fail now, with the real reason
             last_error = e
-            if attempt < MAX_ATTEMPTS - 1:
-                time.sleep(RETRY_BASE_DELAY_SECONDS * (2 ** attempt))
+            if attempt >= MAX_ATTEMPTS - 1:
+                break
+
+            requested = _server_requested_wait(e)
+            if requested is not None:
+                # Add a second of slack: sleeping for exactly the stated
+                # window tends to land right on the boundary and fail again.
+                wait = min(requested + 1.0, MAX_SERVER_REQUESTED_WAIT_SECONDS)
+            else:
+                wait = RETRY_BASE_DELAY_SECONDS * (2 ** attempt)
+            time.sleep(wait)
 
     raise ModelUnavailableError(
         f"{model} was unavailable after {MAX_ATTEMPTS} attempts: {last_error}. "
