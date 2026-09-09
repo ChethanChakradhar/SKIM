@@ -269,9 +269,99 @@ default regardless of whether the account pays. Billing tier is account-level an
 visible in the console at https://aistudio.google.com/apikey. This mistake was made once in
 this project already; the header looks authoritative and isn't.
 
-**Next — Step 4: Validation.** Do the line items sum to the printed subtotal? Does
-subtotal + tax = total? Flag failures for review. Read the permutation-invariance caveat
-above before treating a MATCH as proof of correctness.
+**Done — Step 4: Validation** (`skim/validate.py`, 34 passing tests, 64 suite-wide)
+
+A receipt is a *redundant document* — it states the same facts more than once, so it
+validates itself. That is an accuracy signal costing nothing and needing no labels, which is
+the only kind a one-person project will ever have.
+
+Six checks:
+
+| Check | What only it can catch |
+|---|---|
+| `items_sum_to_subtotal` | a misread or extra line amount |
+| `subtotal_plus_tax_is_total` | a misread tax or total (independent of the above) |
+| `line_arithmetic` | localizes to a *specific line* — qty × unit_price vs printed total |
+| `tax_rate` | **a misread per-line tax flag.** Nothing else in the pipeline can see this |
+| `payment_reconciles` | a misread total, via a completely independent path |
+| `item_count` | **a dropped line.** All arithmetic is computed from items we have, so a drop plus a compensating subtotal misread is self-consistent |
+
+Design rules established here:
+
+- **Money is compared in integer cents, never floats.** The module's whole job is comparing
+  money for equality and `0.1 + 0.2 != 0.3` in binary floating point.
+- **Tolerance is asymmetric on purpose.** Zero between two *printed* numbers; one cent where
+  we recompute a product the register itself rounded (`0.52 × 2.49 = 1.2948`, printed 1.29).
+  Backwards would pass broken receipts and fail good ones.
+- **`UNCHECKABLE` is a distinct status from `FAIL`,** and `evidence_count` counts only checks
+  that ran. A receipt printing less proves less about itself; scoring absence as a pass
+  flatters the numbers, scoring it as failure queues correct receipts for review.
+- **`validate()` is pure and never repairs.** The evidence of what the model actually
+  returned is what will tell us whether a prompt or model change helped.
+- **A check is only as good as the independence of its two sides.** This is why the prompt
+  forbids the model from deriving the tax rate or counting its own line items — a check
+  whose sides share a source is decorative.
+- **One failure sends a receipt to review.** A false alarm costs seconds; a wrong price
+  accepted corrupts the index permanently and invisibly. Same asymmetry as Step 2's
+  "a wrong crop is worse than no crop".
+
+**Step 4 forced a Step 3 schema change**, which is the lesson worth keeping: the validation
+layer decides what extraction must capture. `tax_rate_percent`, `amount_paid`,
+`change_given`, `rounding_adjustment` and `item_count_printed` were added to
+`RECEIPT_SCHEMA` only because checks needed them. Design the schema backwards from the
+checks, not forwards from what receipts happen to print.
+
+Real-world quirks encoded in the checks (each has a test named after it):
+- Connecticut does not tax unprepared groceries, so the printed rate applies to the
+  **taxable subset**, not the subtotal — Walmart charges 6.35% on $31.03, not $41.80.
+- Registers print change with inconsistent signs (Dollar Tree prints `$-2.77`). Extraction
+  copies the sign; `check_payment_reconciles` takes the magnitude, in the open.
+- Cash rounding is printed on its own line (`ROUNDING 0.02`). Ignore it and Walmart looks
+  two cents wrong.
+
+**Still true — validation checks arithmetic consistency, not transcription fidelity.** If
+the model read `MILK` as `MILT`, everything passes. The permutation blind spot stands: a
+price column read one row out of step against the descriptions sums identically and each
+line still agrees internally. A 95% pass rate means 95% *internally consistent*.
+
+### Fidelity was measured once, by hand (Sept 2026)
+
+All three receipts were read by eye and diffed against the extraction. **Zero transcription
+errors** — 37 line items across three receipts, every description, quantity, unit price,
+amount and tax flag correct, including the Dollar Tree half-line price offset and every
+faded digit on the India Market receipt. Only difference: trivial separator normalization
+(`CUT : 310 GM` → `CUT: 310 GM`). One nice moment — line 14 `GUAVA` has a genuinely
+illegible unit price on the paper, and the arithmetic check confirmed the model's `1.49`
+via `1.83 × 1.49 = 2.73`. The check saw what the eye could not.
+
+### KNOWN RISK — representational drift between runs (not yet addressed)
+
+The danger is not that the model misreads. It is that it **represents the same receipt
+differently on different runs**. Observed across two runs of identical code on identical
+images:
+
+- India Market: `ONION 10LB YELLOW` became `1 ONION 10LB YELLOW` (the receipt's own line
+  sequence number leaked into the product name). Fixed in the prompt, and verified fixed.
+- Walmart: 10 line items became 11, with the literal `** VOIDED ENTRY **` marker promoted
+  to its own "product". Not addressed.
+
+**Both runs passed every check, both times.** Validation is blind to this by construction,
+and `temperature=0` reduces drift without eliminating it.
+
+For a project premised on tracking one product's price across months, drift is more
+dangerous than a misread digit: a wrong price fails an arithmetic check and gets caught,
+whereas `ONION 10LB YELLOW` silently becoming a second distinct product never fails
+anything — it just halves the onion price history.
+
+The fix when it becomes worth it is **self-consistency sampling**: extract twice, diff, and
+flag disagreements. Costs one extra call per receipt (~1.4¢) and is the only technique that
+can see this failure mode. Deliberately deferred — with three receipts there is no way to
+measure how often drift actually matters. Revisit at ~30 receipts and measure the drift
+rate rather than guessing at it.
+
+**Next — Step 5: Product normalization.** Resolve `GV MLK 2% 1GAL` and
+`GREAT VAL MILK 2% GALLON` to one canonical product. The hard part and the heart of the
+project.
 
 Keep showing before/after images at each stage so Chethan can see each operation doing its
 job rather than taking it on trust. Step 2's stage-by-stage review page:

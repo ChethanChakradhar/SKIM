@@ -21,26 +21,33 @@ sys.path.insert(0, str(ROOT))
 from skim.extract import LineItem, Receipt
 from skim.validate import (
     CheckStatus,
+    check_item_count,
     check_items_sum_to_subtotal,
     check_line_arithmetic,
+    check_payment_reconciles,
     check_subtotal_plus_tax_is_total,
+    check_tax_rate,
     to_cents,
     validate,
 )
 
 
-def line(number, description, total, quantity=None, unit_price=None, voided=False):
+def line(number, description, total, quantity=None, unit_price=None,
+         voided=False, tax_flag=None):
     return LineItem(
         line_number=number,
         raw_description=description,
         line_total=total,
         quantity=quantity,
         unit_price=unit_price,
+        tax_flag=tax_flag,
         is_voided=voided,
     )
 
 
-def receipt(items, subtotal=None, tax=None, total=None):
+def receipt(items, subtotal=None, tax=None, total=None, tax_rate_percent=None,
+            amount_paid=None, change_given=None, rounding_adjustment=None,
+            item_count_printed=None):
     return Receipt(
         merchant_name="Test Store",
         store_number=None,
@@ -52,6 +59,11 @@ def receipt(items, subtotal=None, tax=None, total=None):
         subtotal=subtotal,
         tax=tax,
         total=total,
+        tax_rate_percent=tax_rate_percent,
+        amount_paid=amount_paid,
+        change_given=change_given,
+        rounding_adjustment=rounding_adjustment,
+        item_count_printed=item_count_printed,
     )
 
 
@@ -156,6 +168,105 @@ class LineArithmeticTests(unittest.TestCase):
     def test_voided_lines_are_skipped(self):
         r = receipt([line(1, "VOID", None, quantity=1, unit_price=1.0, voided=True)])
         self.assertEqual(check_line_arithmetic(r), [])
+
+
+class TaxRateTests(unittest.TestCase):
+    def walmart(self, **overrides):
+        # The real Walmart basket: N-flagged food is untaxed, so 6.35%
+        # applies to 31.03, not to the 41.80 subtotal.
+        items = [
+            line(1, "RAT TRAP", 3.43, tax_flag="X"),
+            line(2, "STERLT-10G", 9.98, tax_flag="X"),
+            line(3, "BNLS CK BRST", 9.83, tax_flag="N"),
+            line(4, "BLUE BANDED", 2.56, tax_flag="X"),
+            line(5, "IODIZED SALT", 0.94, tax_flag="N"),
+            line(6, "SAFETY PINS", 1.12, tax_flag="X"),
+            line(7, "HIGH NK TANK", 2.00, tax_flag="T"),
+            line(8, "1PK INC AUTO", 1.00, tax_flag="T"),
+            line(9, "MS SC HK SET", 10.94, tax_flag="X"),
+        ]
+        kwargs = dict(subtotal=41.80, tax=1.97, total=43.77, tax_rate_percent=6.35)
+        kwargs.update(overrides)
+        return receipt(items, **kwargs)
+
+    def test_rate_applies_to_the_taxable_subset_only(self):
+        result = check_tax_rate(self.walmart())
+        self.assertIs(result.status, CheckStatus.PASS)
+        self.assertEqual(result.expected_cents, 197)
+
+    def test_a_misread_tax_flag_is_caught(self):
+        # Flip the $9.83 chicken from untaxed to taxable: the expected
+        # tax jumps to 2.59 against a printed 1.97. No other check in
+        # the module can see this error.
+        r = self.walmart()
+        r.line_items[2].tax_flag = "X"
+        self.assertIs(check_tax_rate(r).status, CheckStatus.FAIL)
+
+    def test_no_printed_rate_is_uncheckable(self):
+        # Dollar Tree prints a tax amount but never a rate.
+        self.assertIs(
+            check_tax_rate(self.walmart(tax_rate_percent=None)).status,
+            CheckStatus.UNCHECKABLE,
+        )
+
+    def test_missing_flags_make_it_uncheckable_rather_than_wrong(self):
+        r = self.walmart()
+        r.line_items[0].tax_flag = None
+        self.assertIs(check_tax_rate(r).status, CheckStatus.UNCHECKABLE)
+
+
+class PaymentReconciliationTests(unittest.TestCase):
+    def test_cash_purchase_reconciles(self):
+        r = receipt([], total=12.23, amount_paid=15.00, change_given=2.77)
+        self.assertIs(check_payment_reconciles(r).status, CheckStatus.PASS)
+
+    def test_negative_change_is_compared_by_magnitude(self):
+        # Dollar Tree prints change as "$-2.77". Extraction copies the
+        # sign faithfully; deciding it is irrelevant happens here.
+        r = receipt([], total=12.23, amount_paid=15.00, change_given=-2.77)
+        self.assertIs(check_payment_reconciles(r).status, CheckStatus.PASS)
+
+    def test_printed_rounding_line_is_applied(self):
+        # Walmart: 60.00 - 43.77 = 16.23, but the printed change is
+        # 16.25 because the register printed ROUNDING 0.02. Without
+        # applying it, a correct receipt fails.
+        r = receipt([], total=43.77, amount_paid=60.00, change_given=16.25,
+                    rounding_adjustment=0.02)
+        self.assertIs(check_payment_reconciles(r).status, CheckStatus.PASS)
+
+    def test_wrong_change_fails(self):
+        r = receipt([], total=12.23, amount_paid=15.00, change_given=3.77)
+        self.assertIs(check_payment_reconciles(r).status, CheckStatus.FAIL)
+
+    def test_card_payment_without_change_is_uncheckable(self):
+        r = receipt([], total=12.23, amount_paid=12.23, change_given=None)
+        self.assertIs(
+            check_payment_reconciles(r).status, CheckStatus.UNCHECKABLE
+        )
+
+
+class ItemCountTests(unittest.TestCase):
+    def test_matching_count_passes(self):
+        r = receipt([line(1, "A", 1.0), line(2, "B", 2.0)], item_count_printed=2)
+        self.assertIs(check_item_count(r).status, CheckStatus.PASS)
+
+    def test_voided_lines_do_not_count_as_sold(self):
+        r = receipt(
+            [line(1, "A", 1.0), line(2, "VOID", None, voided=True)],
+            item_count_printed=1,
+        )
+        self.assertIs(check_item_count(r).status, CheckStatus.PASS)
+
+    def test_a_dropped_line_is_caught(self):
+        # The failure mode nothing else can see: if a line were dropped
+        # and the subtotal misread to match, every arithmetic check
+        # would still agree with itself.
+        r = receipt([line(1, "A", 1.0)], item_count_printed=2)
+        self.assertIs(check_item_count(r).status, CheckStatus.FAIL)
+
+    def test_no_printed_count_is_uncheckable(self):
+        r = receipt([line(1, "A", 1.0)], item_count_printed=None)
+        self.assertIs(check_item_count(r).status, CheckStatus.UNCHECKABLE)
 
 
 class ValidationReportTests(unittest.TestCase):

@@ -242,6 +242,156 @@ def check_line_arithmetic(receipt: Receipt) -> List[CheckResult]:
     return results
 
 
+def check_tax_rate(receipt: Receipt) -> CheckResult:
+    """Does the printed tax rate, applied to the taxable items, give the
+    printed tax?
+
+    This is the strongest check available, because it is the only one
+    that tests the per-line tax flags. Nothing else in the pipeline can
+    tell whether "N" was read where "X" was printed.
+
+    The subtlety is that the rate does not apply to the whole subtotal.
+    Connecticut does not tax unprepared groceries, so the Walmart receipt
+    charges 6.35% on $31.03 of taxable goods, not on its $41.80 subtotal
+    -- 1.97, not 2.65. Getting this wrong would fail every mixed-basket
+    receipt in the country.
+    """
+    name = "tax_rate"
+
+    if receipt.tax_rate_percent is None:
+        return CheckResult(name, CheckStatus.UNCHECKABLE, "no tax rate printed")
+    if receipt.tax is None:
+        return CheckResult(name, CheckStatus.UNCHECKABLE, "no tax amount printed")
+
+    # Flags vary by chain, so treat the ones that mean "not taxed" as the
+    # known set and assume anything else is taxable. Guessing wrong in
+    # this direction produces a visible failed check rather than a silent
+    # pass, which is the safer way to be wrong.
+    NON_TAXABLE_FLAGS = {"N", "F", "O"}
+    taxable = [
+        i for i in receipt.line_items
+        if not i.is_voided
+        and i.line_total is not None
+        and (i.tax_flag or "").strip().upper() not in NON_TAXABLE_FLAGS
+    ]
+    if not taxable:
+        return CheckResult(
+            name, CheckStatus.UNCHECKABLE, "no line items are flagged taxable"
+        )
+    if any(i.tax_flag is None for i in receipt.line_items if not i.is_voided):
+        return CheckResult(
+            name, CheckStatus.UNCHECKABLE, "some lines have no tax flag printed"
+        )
+
+    taxable_cents = sum(to_cents(i.line_total) for i in taxable)
+    expected = int(round(taxable_cents * receipt.tax_rate_percent / 100))
+    actual = to_cents(receipt.tax)
+    difference = abs(expected - actual)
+    summary = (
+        f"{len(taxable)} taxable items = {format_cents(taxable_cents)} "
+        f"x {receipt.tax_rate_percent:g}%"
+    )
+
+    # A cent of tolerance: the register rounds the tax it computes, and
+    # on a mixed basket some chains round per line rather than on the
+    # taxable total.
+    if difference <= LINE_TOTAL_TOLERANCE_CENTS:
+        return CheckResult(
+            name, CheckStatus.PASS, f"{summary} = {format_cents(actual)}",
+            expected_cents=expected, actual_cents=actual,
+        )
+
+    return CheckResult(
+        name, CheckStatus.FAIL,
+        f"{summary} = {format_cents(expected)} but the printed tax is "
+        f"{format_cents(actual)} -- a tax flag or an amount is misread",
+        expected_cents=expected, actual_cents=actual,
+    )
+
+
+def check_payment_reconciles(receipt: Receipt) -> CheckResult:
+    """Does amount paid minus the total equal the change given?
+
+    Independent of every other check: it uses the total and two numbers
+    nothing else touches. A receipt can have perfect item arithmetic and
+    still fail here if the total was misread.
+
+    Change is compared by magnitude because registers disagree about the
+    sign -- Dollar Tree prints "$-2.77" for change handed back, others
+    print "2.77". Extraction copies the sign as printed; deciding it
+    doesn't matter is this layer's call to make, in the open.
+    """
+    name = "payment_reconciles"
+
+    if receipt.amount_paid is None or receipt.change_given is None:
+        return CheckResult(
+            name, CheckStatus.UNCHECKABLE, "payment or change not printed"
+        )
+    if receipt.total is None:
+        return CheckResult(name, CheckStatus.UNCHECKABLE, "no total printed")
+
+    # Cash registers may round the amount due to the nearest nickel and
+    # print the adjustment. Without it, the Walmart receipt looks two
+    # cents out: 60.00 - 43.77 = 16.23, but the printed change is 16.25.
+    rounding_cents = to_cents(receipt.rounding_adjustment) or 0
+    expected = to_cents(receipt.amount_paid) - to_cents(receipt.total) + rounding_cents
+    actual = abs(to_cents(receipt.change_given))
+    difference = abs(expected - actual)
+
+    detail_rounding = (
+        f" (+{format_cents(rounding_cents)} rounding)" if rounding_cents else ""
+    )
+    summary = (
+        f"paid {receipt.amount_paid:.2f} - total {receipt.total:.2f}"
+        f"{detail_rounding}"
+    )
+
+    if difference <= EXACT:
+        return CheckResult(
+            name, CheckStatus.PASS, f"{summary} = change {format_cents(actual)}",
+            expected_cents=expected, actual_cents=actual,
+        )
+
+    return CheckResult(
+        name, CheckStatus.FAIL,
+        f"{summary} = {format_cents(expected)} but the printed change is "
+        f"{format_cents(actual)}",
+        expected_cents=expected, actual_cents=actual,
+    )
+
+
+def check_item_count(receipt: Receipt) -> CheckResult:
+    """Does the number of items we extracted match the count the receipt
+    printed?
+
+    The only check that can catch a *dropped* line. Every arithmetic
+    check above is computed from the items we have, so a receipt missing
+    an item entirely can still be perfectly self-consistent -- the sum
+    would just be short, and would disagree with the subtotal. But if the
+    model dropped a line AND misread the subtotal to match, only a
+    printed count would notice.
+
+    Voided lines are excluded: the register's count is of items sold.
+    """
+    name = "item_count"
+
+    if receipt.item_count_printed is None:
+        return CheckResult(name, CheckStatus.UNCHECKABLE, "no item count printed")
+
+    extracted = len([i for i in receipt.line_items if not i.is_voided])
+    if extracted == receipt.item_count_printed:
+        return CheckResult(
+            name, CheckStatus.PASS,
+            f"extracted {extracted} items, receipt says {receipt.item_count_printed}",
+        )
+
+    return CheckResult(
+        name, CheckStatus.FAIL,
+        f"extracted {extracted} items but the receipt says "
+        f"{receipt.item_count_printed} -- a line was dropped or invented",
+    )
+
+
 @dataclass
 class ValidationReport:
     """Everything we know about how much to trust one extracted receipt."""
@@ -303,6 +453,9 @@ def validate(receipt: Receipt) -> ValidationReport:
     checks: List[CheckResult] = [
         check_items_sum_to_subtotal(receipt),
         check_subtotal_plus_tax_is_total(receipt),
+        check_tax_rate(receipt),
+        check_payment_reconciles(receipt),
+        check_item_count(receipt),
     ]
     checks.extend(check_line_arithmetic(receipt))
     return ValidationReport(checks=checks)

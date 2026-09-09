@@ -142,6 +142,15 @@ class Receipt:
     subtotal: Optional[float]  # as PRINTED, never summed by the model
     tax: Optional[float]
     total: Optional[float]
+    # The fields below exist for one reason: Step 4 can check them
+    # against each other. They were added after validation was written,
+    # because the checks are what decide which numbers are worth
+    # capturing -- a receipt prints plenty we have no use for.
+    tax_rate_percent: Optional[float] = None  # "TAX1 6.3500 %" -> 6.35
+    amount_paid: Optional[float] = None  # cash tendered or card charged
+    change_given: Optional[float] = None  # sign varies by store; as printed
+    rounding_adjustment: Optional[float] = None  # "ROUNDING 0.02"
+    item_count_printed: Optional[int] = None  # "# ITEMS SOLD 9"
     currency: str = "USD"
     unreadable_notes: Optional[str] = None
 
@@ -195,6 +204,11 @@ RECEIPT_SCHEMA: Dict[str, Any] = {
         "subtotal": {"type": "number", "nullable": True},
         "tax": {"type": "number", "nullable": True},
         "total": {"type": "number", "nullable": True},
+        "tax_rate_percent": {"type": "number", "nullable": True},
+        "amount_paid": {"type": "number", "nullable": True},
+        "change_given": {"type": "number", "nullable": True},
+        "rounding_adjustment": {"type": "number", "nullable": True},
+        "item_count_printed": {"type": "integer", "nullable": True},
         "unreadable_notes": {"type": "string", "nullable": True},
     },
     "required": ["line_items"],
@@ -210,6 +224,16 @@ ITEM DESCRIPTIONS
   abbreviations, misspellings and cryptic codes. "GV MLK 2% 1GAL" stays
   "GV MLK 2% 1GAL". Never expand it to "Great Value Milk". A later stage
   does that work and needs the original string.
+- `raw_description` is the product description ONLY. Some receipts print
+  a sequence number in front of each item ("1 ONION 10LB YELLOW",
+  "2 MUSHROOMS"). That number is a separate column, not part of the
+  product's name: put it in `line_number` and start `raw_description` at
+  the product ("ONION 10LB YELLOW"). Likewise drop a trailing ":" or
+  other punctuation that only separates columns.
+  This matters more than it looks: a later stage decides whether two
+  descriptions refer to the same product, and a position number baked
+  into the name would make the same item bought twice look like two
+  different products.
 
 TOTALS
 - Report subtotal, tax and total ONLY as printed on the receipt. Never
@@ -217,6 +241,17 @@ TOTALS
   unreadable, return null. A computed total is worse than a missing one,
   because a later stage checks the printed totals against the items to
   detect transcription errors, and your arithmetic would hide them.
+- `tax_rate_percent`: the tax percentage if one is printed, as a number.
+  "TAX1 6.3500 %" is 6.35. Do not derive it by dividing tax by subtotal.
+- `amount_paid`: cash tendered or the amount charged to a card.
+- `change_given`: the change line exactly as printed, keeping its sign.
+  Some registers print change as a negative number. Copy what is there;
+  do not correct it.
+- `rounding_adjustment`: a printed rounding line ("ROUNDING 0.02"), if any.
+- `item_count_printed`: the item count if the receipt states one
+  ("# ITEMS SOLD 9"), as an integer. Do not count the lines yourself --
+  a later stage compares your line count against this printed number,
+  and counting would make that comparison meaningless.
 
 EVERY LINE
 - Include every purchased line in printed order, numbered from 1.
@@ -344,6 +379,11 @@ def _parse_receipt(payload: Dict[str, Any]) -> Receipt:
         subtotal=payload.get("subtotal"),
         tax=payload.get("tax"),
         total=payload.get("total"),
+        tax_rate_percent=payload.get("tax_rate_percent"),
+        amount_paid=payload.get("amount_paid"),
+        change_given=payload.get("change_given"),
+        rounding_adjustment=payload.get("rounding_adjustment"),
+        item_count_printed=payload.get("item_count_printed"),
         currency=payload.get("currency") or "USD",
         unreadable_notes=payload.get("unreadable_notes"),
     )
