@@ -13,6 +13,9 @@ data/processed/*
 !data/processed/.gitkeep
 *.db
 *.sqlite3
+# WAL mode writes these two sidecars beside the database
+*.db-wal
+*.db-shm
 
 # OS
 .DS_Store
