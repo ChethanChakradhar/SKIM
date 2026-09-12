@@ -69,12 +69,13 @@ Photo -> preprocess -> VLM extraction -> validation -> product normalization
    than swapping models does. *(DONE)*
 3. **Extraction** — vision-language model returns strict JSON. *(DONE)*
 4. **Validation** — do line items sum to subtotal? Does subtotal + tax = total? A free
-   accuracy signal with no labeling required. Flag failures for review. *(NEXT)*
+   accuracy signal with no labeling required. Flag failures for review. *(DONE)*
 5. **Product normalization** — resolve `GV MLK 2% 1GAL` and `GREAT VAL MILK 2% GALLON` to
    one canonical product. **This is the hard part and the heart of the project.**
+   *(parser DONE, matcher NEXT — blocked on API quota)*
 6. **Unit normalization** — price per ounce, not price per package, or nothing is
-   comparable. Watch for weighted items (`0.87 LB @ $3.99`) vs. unit items.
-7. **Storage** — SQLite to start.
+   comparable. Watch for weighted items (`0.87 LB @ $3.99`) vs. unit items. *(DONE)*
+7. **Storage** — SQLite to start. *(NEXT unblocked step)*
 8. **Analysis** — basket index, anomaly detection, forecasting.
 
 ## Decisions already made — do not relitigate without new information
@@ -359,9 +360,100 @@ can see this failure mode. Deliberately deferred — with three receipts there i
 measure how often drift actually matters. Revisit at ~30 receipts and measure the drift
 rate rather than guessing at it.
 
-**Next — Step 5: Product normalization.** Resolve `GV MLK 2% 1GAL` and
-`GREAT VAL MILK 2% GALLON` to one canonical product. The hard part and the heart of the
-project.
+**In progress — Step 5: Product normalization** (`skim/normalize.py`, parser done)
+
+**The approach was chosen by experiment, not intuition.** Measured on real strings from the
+first three receipts:
+
+| | same-product pairs | *different*-product pairs |
+|---|---|---|
+| character fuzzy (stdlib difflib) | 0.63 | — |
+| embedding the **raw** string | 0.61 | **0.66** |
+| embedding the **parsed** form | **0.96** | 0.66 |
+
+Raw-string matching is unusable: true-match scores overlap false-match scores, so no
+threshold exists. `PLUM TOMATO` vs `GUAVA` scores 0.66 — higher than `BNLS CK BRST` scores
+against `BONELESS CHICKEN BREAST`. The reason matters: **embeddings measure semantic
+relatedness; entity resolution needs identity.** Two fruits are genuinely related and an
+abbreviation is genuinely dissimilar to its expansion, so the signal points the wrong way.
+
+Parsing first opens a clean 0.30 margin. Hence the architecture: **parse, then embed.**
+
+```
+raw string -> [1] parse to attributes -> [2] embed parsed form
+           -> [3] cosine retrieve candidates -> [4] threshold + attribute agreement
+           -> [5] human confirms ambiguous -> catalog
+```
+
+Stage 1 is built. Stages 2-5 are not.
+
+**On scale, deliberately:** at ~2,000 unique products the whole index is 24 MB of numpy and
+candidate retrieval is one matrix-vector product. **No vector database, no FAISS, no ANN
+index.** The blocking literature (SC-Block, WDC-B) exists for 200-billion-comparison
+problems. Reaching for that here would be resume-driven architecture, and saying so is a
+better interview answer than having built it.
+
+Parser design rules:
+
+- **Retry when UNIDENTIFIED, not when any field is null.** A null brand is correct for loose
+  produce; a null size is correct for a rat trap. Retrying on any null retries nearly
+  everything.
+- **The retry adds context** (store + sibling items) rather than repeating the first call —
+  an identical prompt at temperature 0 mostly re-buys the same answer.
+- **The retry is only kept if it resolved something.** Context creates pressure to produce
+  an answer, and a guess made under pressure is worth less than an honest unknown.
+- **`ProductCache` writes after every entry.** A store prints the same string for the same
+  product every time, so this is a remembering problem, not a matching problem — and with
+  free-tier quotas, a run dying partway through is routine.
+- **Categories are an open vocabulary that is remembered.** A fixed list put `MINI
+  SKETCHBOOK` in "other" and would do the same to a headset or a tank top; a field where a
+  third of rows say "other" can't answer Step 8. But left entirely free, a model emits
+  "dairy", "Dairy" and "dairy products" across four receipts. So: the model may name
+  anything, and every name is normalized, persisted, and offered back on the next call.
+
+**Done — Step 6: Unit normalization** (`skim/units.py`, 19 passing tests, 110 suite-wide)
+
+Two rules: comparison happens only **within a dimension** (the dimension travels with every
+price, so Step 8 can't average price-per-gram against price-per-item), and a receipt line is
+one of two different things:
+
+```
+UNIT     ONION 10LB YELLOW  1 @ 6.99   size is in the DESCRIPTION -> 6.99/10lb = 0.699/lb
+WEIGHED  DESI OKRA       0.52 @ 2.49   quantity IS the weight; unit price already per lb
+```
+
+Telling them apart is a heuristic, because the receipt never says: **a count is a whole
+number** — nobody buys 0.52 onions. Quantity of exactly 1 is genuinely ambiguous and
+resolves to *unit item*, because the error is asymmetric — reading the onion sack as weighed
+reports $6.99/lb instead of $0.70/lb, silently.
+
+**This closes the `unit: null` gap Step 3 left open.** When a receipt prints `0.52 @ 2.49`
+with no unit label, this assumes pounds and records `inferred_unit` on the result — so every
+price resting on an assumption can be found and corrected. Third time an inference has been
+pushed downstream to keep it auditable.
+
+Verified on real lines: onions $0.154/100g, plum tomato $0.284/100g, paneer $1.509/100g,
+with the 2-pack of paneer correctly counted as 28 oz. `KITCHEN TOWEL 15X25` is declined
+outright — price-per-inch is not a number anyone wants, and declining beats inventing.
+
+### BLOCKED — free-tier quota makes Step 5 unrunnable
+
+`gemini-3.6-flash` free tier allows **20 requests per day per model** (and 5/minute). One
+receipt costs 1 extraction + up to 18 parse calls = **19 calls, so one receipt per day.**
+Iterating on a prompt needs 35 calls, i.e. two days per iteration.
+
+`DailyQuotaExhaustedError` now fails immediately rather than retrying — per-day and
+per-minute quotas both arrive as 429 with a stated `retryDelay`, and only the `quotaId`
+distinguishes them. Waiting 58s does not restore a day's allowance.
+
+Chethan attempted to link billing and **got stuck on the Google Cloud country/payment form**.
+Workarounds not yet tried: create the billing account directly at
+console.cloud.google.com/billing rather than through the AI Studio embed; check for an
+unticked ToS box below the fold; disable ad blockers (they break Google's payment iframes).
+
+**Next unblocked work: Step 7 (SQLite storage).** It needs no API calls, and Step 5's
+`ProductCache` and `CategoryVocabulary` are currently JSON files explicitly meant to migrate
+into it.
 
 Keep showing before/after images at each stage so Chethan can see each operation doing its
 job rather than taking it on trust. Step 2's stage-by-stage review page:
