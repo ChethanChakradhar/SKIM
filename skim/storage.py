@@ -52,7 +52,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # How to bring an EXISTING database up to each version. Keyed by the
 # version being migrated TO.
@@ -65,18 +65,36 @@ SCHEMA_VERSION = 3
 # that already exists, so without this an added column would simply never
 # appear and every write to it would fail on a database that had been in
 # use.
+# Each version lists the columns it introduced, as (table, column, type).
+#
+# Expressed as data rather than raw ALTER statements so they can be
+# applied IDEMPOTENTLY -- which turns out to be essential, not tidy.
+# `CREATE TABLE IF NOT EXISTS` builds any *missing* table at the CURRENT
+# shape, columns and all. So a database old enough to predate a table
+# gets that table complete, and a migration that then adds a column to it
+# fails with "duplicate column name". Checking first is what makes
+# "create what is missing, then patch what is old" safe to combine.
 MIGRATIONS = {
-    2: [
-        # Multi-user, minimally: a display name on each receipt.
-        "ALTER TABLE receipts ADD COLUMN uploaded_by TEXT",
-    ],
-    3: [
-        # A name alone cannot keep one person's receipts separate from
-        # another's -- anyone could type any name. A shopper owns their
-        # receipts, and a PIN is what proves it is them.
-        "ALTER TABLE receipts ADD COLUMN shopper_id INTEGER REFERENCES shoppers(shopper_id)",
-    ],
+    # Multi-user, minimally: a display name on each receipt.
+    2: [("receipts", "uploaded_by", "TEXT")],
+    # A name alone cannot separate one person's receipts from another's --
+    # anyone could type any name. A shopper owns their receipts.
+    3: [("receipts", "shopper_id", "INTEGER REFERENCES shoppers(shopper_id)")],
+    # People do not read prices in grams. Keep the same price in the unit
+    # the item was actually sold in, so the page never has to guess.
+    4: [("line_items", "display_unit", "TEXT"),
+        ("line_items", "price_per_display", "REAL")],
 }
+
+
+def _add_column_if_missing(connection: sqlite3.Connection, table: str,
+                           column: str, declaration: str) -> None:
+    existing = {row["name"] for row in
+                connection.execute("PRAGMA table_info(" + table + ")")}
+    if column not in existing:
+        connection.execute(
+            "ALTER TABLE " + table + " ADD COLUMN " + column + " " + declaration)
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -195,7 +213,12 @@ CREATE TABLE IF NOT EXISTS line_items (
     base_quantity     REAL,
     price_per_base    REAL,   -- a ratio, not an amount -- see module docstring
     inferred_unit     TEXT,   -- set when 'lb' was assumed rather than read
-    normalization_note TEXT
+    normalization_note TEXT,
+    -- The same price, in the unit a person recognises: "lb" for produce
+    -- weighed at a US register, "100g" for something labelled in grams,
+    -- "each" for things you just buy one of.
+    display_unit      TEXT,
+    price_per_display REAL
 );
 
 -- Step 4's verdicts, kept rather than printed. The pass rate over time
@@ -209,9 +232,12 @@ CREATE TABLE IF NOT EXISTS validation_results (
     line_number INTEGER
 );
 
--- Indexes chosen for the four questions the README asks, not for
--- completeness. Each one turns a table scan into a lookup for a query
--- that will run on every price chart.
+"""
+
+# Indexes are applied separately, AFTER migrations. They name columns, and
+# a migration that adds an indexed column must run before the index that
+# uses it -- see _migrate for the full ordering.
+INDEXES = """
 CREATE INDEX IF NOT EXISTS idx_line_items_product ON line_items(product_id);
 CREATE INDEX IF NOT EXISTS idx_line_items_receipt ON line_items(receipt_id);
 CREATE INDEX IF NOT EXISTS idx_receipts_date      ON receipts(purchase_date);
@@ -269,6 +295,7 @@ def _migrate(connection: sqlite3.Connection) -> None:
         # created once and stamped; the migrations would only try to add
         # columns that are already there.
         connection.executescript(SCHEMA)
+        connection.executescript(INDEXES)
         connection.execute("DELETE FROM schema_version")
         connection.execute("INSERT INTO schema_version (version) VALUES (?)",
                            (SCHEMA_VERSION,))
@@ -285,19 +312,26 @@ def _migrate(connection: sqlite3.Connection) -> None:
             "of Skim -- update the code rather than downgrading the database."
         )
 
-    # Migrations run BEFORE the schema script, not after. SCHEMA ends with
-    # CREATE INDEX statements that name columns; if a future migration adds
-    # an indexed column, creating the index first would fail on a database
-    # that does not have that column yet. Columns first, then anything
-    # built on top of them.
+    # Three phases, and the order is the whole point.
+    #
+    # 1. TABLES first. A migration that ALTERs a table needs that table to
+    #    exist -- including tables introduced by a later version than the
+    #    database currently has.
+    # 2. MIGRATIONS next, adding columns to tables that now certainly exist.
+    # 3. INDEXES last, because an index names columns, and the column it
+    #    names may have arrived in step 2.
+    #
+    # Both orderings have already bitten this project once each: indexes
+    # before columns, then a migration altering a table that had not been
+    # created yet. Three phases is what actually holds.
+    connection.executescript(SCHEMA)
+
     for version in range(current + 1, SCHEMA_VERSION + 1):
-        for statement in MIGRATIONS.get(version, []):
-            connection.execute(statement)
+        for table, column, declaration in MIGRATIONS.get(version, []):
+            _add_column_if_missing(connection, table, column, declaration)
         connection.execute("UPDATE schema_version SET version = ?", (version,))
 
-    # Now safe: creates any tables and indexes added since, and does
-    # nothing to those that already exist.
-    connection.executescript(SCHEMA)
+    connection.executescript(INDEXES)
     connection.commit()
 
 
@@ -394,8 +428,8 @@ def save_line_item(
             receipt_id, line_number, raw_description, product_id, quantity,
             unit_price_cents, line_total_cents, discount_cents, tax_flag,
             is_voided, dimension, base_unit, base_quantity, price_per_base,
-            inferred_unit, normalization_note
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            inferred_unit, normalization_note, display_unit, price_per_display
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         (
             receipt_id, item.line_number, item.raw_description, product_id,
@@ -407,6 +441,8 @@ def save_line_item(
             getattr(normalized, "price_per_base", None),
             getattr(normalized, "inferred_unit", None),
             getattr(normalized, "note", None),
+            getattr(normalized, "display_unit", None),
+            getattr(normalized, "price_per_display", None),
         ),
     )
 

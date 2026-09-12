@@ -37,16 +37,26 @@
         <span>{{ '%.2f'|format((receipt.total_cents or 0) / 100) }}</span></div>
     </div>
 
-    <div class="chips">
-      {% for c in checks %}
-      <span class="chip {{ 'ok' if c.status == 'pass' else ('fail' if c.status == 'fail' else 'na') }}"
-            title="{{ c.detail }}">{{ c.check_name.replace('_', ' ') }}</span>
-      {% endfor %}
-    </div>
-    <p class="note">Those chips are Skim double-checking itself: do the lines add up to the
-    total printed on the paper? Did the change come back right? If it misread a number,
-    the sums stop matching and it says so.
-    {% if ran and passed == ran %}<b>All good on this one.</b>{% endif %}</p>
+    {% set failed = checks | selectattr('status', 'equalto', 'fail') | list %}
+    {% if ran == 0 %}
+      <div class="verdict none">
+        <span class="mark">?</span>
+        <div><b>Couldn't double-check this one</b>
+          <small>The receipt didn't print enough totals to check against.</small></div>
+      </div>
+    {% elif not failed %}
+      <div class="verdict good">
+        <span class="mark">✓</span>
+        <div><b>It all adds up</b>
+          <small>Every line matches the totals printed on the paper.</small></div>
+      </div>
+    {% else %}
+      <div class="verdict bad">
+        <span class="mark">!</span>
+        <div><b>Something doesn't match</b>
+          <small>{{ failed | map(attribute='detail') | join(' · ') }}</small></div>
+      </div>
+    {% endif %}
   </div>
 </section>
 
@@ -57,16 +67,15 @@
   <div class="body">
     <div class="tblwrap">
       <table>
-        <thead><tr><th>Item</th><th>Category</th><th>Amount</th>
-          <th style="text-align:right">Per 100g</th></tr></thead>
+        <thead><tr><th>Item</th><th>Category</th>
+          <th style="text-align:right">What it works out at</th></tr></thead>
         <tbody>
           {% for i in priced %}
           <tr>
             <td>{{ i.canonical_text or i.raw_description }}
               {% if i.inferred_unit %}<span class="assumed">↯ {{ i.inferred_unit }} assumed</span>{% endif %}</td>
-            <td>{% if i.category %}<span class="cat {{ i.category }}">{{ i.category }}</span>{% endif %}</td>
-            <td>{% if i.base_quantity %}{{ '%.0f'|format(i.base_quantity) }} {{ i.base_unit }}{% endif %}</td>
-            <td class="num">{% if i.dimension == 'weight' %}${{ '%.3f'|format(i.price_per_base * 100) }}{% else %}—{% endif %}</td>
+            <td>{% if i.category %}<span class="cat {{ i.category }}">{{ i.category.replace('_', ' ') }}</span>{% endif %}</td>
+            <td class="num">{% if i.price_per_display is not none %}${{ '%.2f'|format(i.price_per_display) }}<small>/{{ i.display_unit }}</small>{% else %}<small style="color:var(--dim)">—</small>{% endif %}</td>
           </tr>
           {% endfor %}
         </tbody>

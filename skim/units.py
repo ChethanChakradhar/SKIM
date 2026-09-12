@@ -131,6 +131,32 @@ ASSUMED_WEIGHED_UNIT = "lb"
 WEIGHED_QUANTITY_EPSILON = 0.001
 
 
+# Comparison happens in base units, but PEOPLE do not think in base
+# units. "$0.549 per 100g of okra" is unreadable to an American shopper
+# and, worse, throws away the number actually printed on the receipt --
+# which was $2.49 a pound.
+#
+# So every price carries a second form: the same value expressed in the
+# unit the item was really sold in. Pounds for produce weighed at a US
+# register, per-100g for something labelled in grams, per item for
+# things you just buy one of. The base unit stays underneath for
+# comparing; this is purely what gets shown.
+DISPLAY_RULES = {
+    # origin unit -> (unit to display, how many base units it contains)
+    "lb":    ("lb",    WEIGHT_TO_GRAMS["lb"]),
+    "oz":    ("lb",    WEIGHT_TO_GRAMS["lb"]),     # US shelf tags price meat by the pound
+    "g":     ("100g",  100.0),
+    "kg":    ("kg",    1000.0),
+    "fl_oz": ("fl oz", VOLUME_TO_ML["fl_oz"]),
+    "cup":   ("fl oz", VOLUME_TO_ML["fl_oz"]),
+    "pt":    ("fl oz", VOLUME_TO_ML["fl_oz"]),
+    "qt":    ("qt",    VOLUME_TO_ML["qt"]),
+    "gal":   ("gal",   VOLUME_TO_ML["gal"]),
+    "ml":    ("100ml", 100.0),
+    "l":     ("l",     1000.0),
+}
+
+
 @dataclass
 class NormalizedPrice:
     """A price made comparable, plus the reasoning that got there."""
@@ -142,6 +168,8 @@ class NormalizedPrice:
     basis: str  # "weighed" or "unit" -- which arithmetic was used
     inferred_unit: Optional[str] = None  # set when we assumed pounds
     note: Optional[str] = None  # why it could not be normalized
+    display_unit: Optional[str] = None  # "lb", "100g", "each" -- for humans
+    price_per_display: Optional[float] = None  # the same price, in that unit
 
     @property
     def is_comparable(self) -> bool:
@@ -163,6 +191,22 @@ class NormalizedPrice:
         if self.dimension == VOLUME:
             return self.price_per_base * VOLUME_TO_ML["fl_oz"]
         return None
+
+
+def _with_display(price: NormalizedPrice, origin_unit: Optional[str]) -> NormalizedPrice:
+    """Attach the human-facing price, in the unit the item was sold in."""
+    if price.price_per_base is None:
+        return price
+    if price.dimension == COUNT:
+        price.display_unit, price.price_per_display = "each", price.price_per_base
+        return price
+    label, base_per_display = DISPLAY_RULES.get(
+        (origin_unit or "").lower(),
+        ("100g", 100.0) if price.dimension == WEIGHT else ("100ml", 100.0),
+    )
+    price.display_unit = label
+    price.price_per_display = price.price_per_base * base_per_display
+    return price
 
 
 def _looks_weighed(quantity: Optional[float]) -> bool:
@@ -240,10 +284,10 @@ def _normalize_weighed(
     # per_unit is dollars per `unit` (e.g. per lb); divide by how many
     # base units are in one of those to get dollars per base unit.
     price_per_base = per_unit / to_base(1.0, unit)
-    return NormalizedPrice(
+    return _with_display(NormalizedPrice(
         dimension, BASE_UNITS[dimension], base_quantity, price_per_base,
         "weighed", inferred_unit=inferred,
-    )
+    ), unit)
 
 
 def _normalize_unit_item(
@@ -264,10 +308,10 @@ def _normalize_unit_item(
         # Countable goods with no printed size are still comparable as
         # a price per item -- a rat trap is a rat trap.
         if line_total is not None:
-            return NormalizedPrice(
+            return _with_display(NormalizedPrice(
                 COUNT, "each", count, line_total / count, "unit",
                 note="no package size; comparable per item only",
-            )
+            ), "each")
         return NormalizedPrice(None, None, None, None, "unit",
                                note="no package size and no line total")
 
@@ -291,7 +335,7 @@ def _normalize_unit_item(
         return NormalizedPrice(dimension, BASE_UNITS[dimension], base_quantity,
                                None, "unit", note="no line total to divide")
 
-    return NormalizedPrice(
+    return _with_display(NormalizedPrice(
         dimension, BASE_UNITS[dimension], base_quantity,
         line_total / base_quantity, "unit",
-    )
+    ), parsed.size_unit)

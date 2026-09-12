@@ -48,30 +48,29 @@
 
 {% if prices %}
 <section class="panel cy pop">
-  <div class="bar">What it really costs <span class="right">per 100g</span></div>
+  <div class="bar">What it really costs <span class="right">per unit</span></div>
   <div class="body">
     <div class="tblwrap">
       <table>
         <thead><tr><th>Product</th><th>Category</th><th>Store</th><th>When</th>
-          <th style="text-align:right">Per 100g</th></tr></thead>
+          <th style="text-align:right">What it works out at</th></tr></thead>
         <tbody>
           {% for p in prices %}
-          {% if p.dimension == 'weight' %}
           <tr>
             <td>{{ p.canonical_text }}
               {% if p.inferred_unit %}<span class="assumed">↯ {{ p.inferred_unit }} assumed</span>{% endif %}</td>
-            <td>{% if p.category %}<span class="cat {{ p.category }}">{{ p.category }}</span>{% endif %}</td>
+            <td>{% if p.category %}<span class="cat {{ p.category }}">{{ p.category.replace('_', ' ') }}</span>{% endif %}</td>
             <td>{{ p.merchant_name or '—' }}</td>
             <td>{{ p.purchase_date or '—' }}</td>
-            <td class="num">${{ '%.3f'|format(p.price_per_base * 100) }}</td>
+            <td class="num">{% if p.price_per_display is not none %}${{ '%.2f'|format(p.price_per_display) }}<small>/{{ p.display_unit }}</small>{% else %}<small style="color:var(--dim)">—</small>{% endif %}</td>
           </tr>
-          {% endif %}
           {% endfor %}
         </tbody>
       </table>
     </div>
-    <p class="note">Everything's priced the same way here, so a big bag and a small bag
-    finally have to fight it out fairly.
+    <p class="note">Everything's shown in the unit it was actually sold in — per pound for
+    produce, per item for things you just buy one of. That's what lets a big bag and a
+    small bag fight it out fairly.
     <b>↯ assumed</b> just means the receipt didn't say whether it weighed things in pounds,
     so we went with pounds.</p>
   </div>
@@ -88,8 +87,8 @@
     </div>
     <div class="scan-meter"><i></i></div>
     <div class="scan-text">
-      <div class="stage" id="scanStage">Reading the paper</div>
-      <div class="sub" id="scanSub">finding the edges and straightening it out</div>
+      <div class="stage" id="scanStage">Straightening it out</div>
+      <div class="sub" id="scanSub">Identity theft is not a joke, Jim!</div>
     </div>
   </div>
 </div>
@@ -115,11 +114,13 @@
   // The scanner runs while the upload is in flight. The stages are the
   // real pipeline steps, paced to roughly how long each one takes, so
   // the wait shows what is happening rather than just that something is.
+  // What it is doing, and a line from The Office to look at while it does.
   const STAGES = [
-    ['Reading the paper',   'finding the edges and straightening it out',   0],
-    ['Pulling the lines',   'every item, price and tax flag',            1800],
-    ['Checking the maths',  'do the lines add up to the printed total?',  5200],
-    ['Naming the products', 'decoding what the abbreviations mean',       7400],
+    ['Straightening it out', 'Identity theft is not a joke, Jim!',            0],
+    ['Reading every line',   'Bears. Beets. Battlestar Galactica.',        2200],
+    ['Checking the maths',   'I DECLARE... the numbers add up!',           5400],
+    ['Pricing it all up',    'Well, well, well. How the turntables.',      7800],
+    ['Nearly there',         'Would I rather be feared or loved? Both.',  10500],
   ];
   const scanner = document.getElementById('scanner');
   const stageEl = document.getElementById('scanStage');
@@ -133,6 +134,9 @@
     STAGES.forEach(([stage, sub, delay]) => setTimeout(() => {
       stageEl.textContent = stage;
       subEl.textContent = sub;
+      subEl.style.animation = 'none';
+      void subEl.offsetWidth;          // force the browser to restart it
+      subEl.style.animation = 'lineIn .4s ease-out both';
     }, delay));
   });
 </script>

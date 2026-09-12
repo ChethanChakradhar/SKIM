@@ -166,12 +166,14 @@ def enrich_receipt(receipt_id: int, store: Optional[str]) -> None:
                 """
                 UPDATE line_items SET product_id = ?, dimension = ?, base_unit = ?,
                     base_quantity = ?, price_per_base = ?, inferred_unit = ?,
-                    normalization_note = ?
+                    normalization_note = ?, display_unit = ?, price_per_display = ?
                 WHERE line_item_id = ?
                 """,
                 (decision.product_id, normalized.dimension, normalized.base_unit,
                  normalized.base_quantity, normalized.price_per_base,
-                 normalized.inferred_unit, normalized.note, row["line_item_id"]),
+                 normalized.inferred_unit, normalized.note,
+                 normalized.display_unit, normalized.price_per_display,
+                 row["line_item_id"]),
             )
             storage.save_alias(connection, store, description, decision.product_id,
                                parsed, parsed.needs_review)
@@ -262,12 +264,12 @@ def dashboard(request: Request):
         prices = connection.execute(
             """
             SELECT p.canonical_text, p.category, r.merchant_name, r.purchase_date,
-                   li.price_per_base, li.dimension, li.base_unit, li.inferred_unit
+                   li.price_per_display, li.display_unit, li.inferred_unit
             FROM line_items li
             JOIN receipts r ON r.receipt_id = li.receipt_id
             JOIN products p ON p.product_id = li.product_id
-            WHERE r.shopper_id = ? AND li.price_per_base IS NOT NULL
-            ORDER BY li.price_per_base DESC
+            WHERE r.shopper_id = ? AND li.price_per_display IS NOT NULL
+            ORDER BY li.price_per_display DESC
             """, (shopper["shopper_id"],)).fetchall()
 
         spend = connection.execute(

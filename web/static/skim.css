@@ -229,7 +229,8 @@ a:hover{text-decoration:underline}
   background:linear-gradient(92deg,var(--lime),var(--cyan),var(--pink));background-size:200% auto;
   -webkit-background-clip:text;background-clip:text;color:transparent;
   animation:shine 3s linear infinite}
-.scan-text .sub{font-size:12.5px;color:var(--dim)}
+.scan-text .sub{font-size:13.5px;color:var(--text);opacity:.82;font-style:italic;
+  max-width:30ch}
 
 /* ---------------- stats ---------------- */
 .stats{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
@@ -274,6 +275,18 @@ a:hover{text-decoration:underline}
 .r-sub{display:flex;justify-content:space-between;font-variant-numeric:tabular-nums;color:#756c58}
 
 /* ---------------- chips, tables, lists ---------------- */
+.verdict{display:flex;align-items:center;gap:15px;margin-top:20px;padding:17px 19px;
+  border-radius:18px;border:1px solid var(--edge);background:var(--card-2)}
+.verdict .mark{flex:0 0 44px;width:44px;height:44px;border-radius:14px;display:grid;
+  place-items:center;font-family:var(--display);font-weight:800;font-size:23px;color:#050507}
+.verdict b{font-family:var(--display);font-size:17px;display:block;letter-spacing:-.02em}
+.verdict small{color:var(--dim);font-size:12.5px;display:block;margin-top:3px}
+.verdict.good .mark{background:var(--lime);box-shadow:0 0 26px -4px var(--lime)}
+.verdict.good{border-color:rgba(204,255,0,.28)}
+.verdict.bad .mark{background:var(--pink);box-shadow:0 0 26px -4px var(--pink)}
+.verdict.bad{border-color:rgba(255,45,149,.35)}
+.verdict.none .mark{background:var(--dim)}
+
 .chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:18px}
 .chip{font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;padding:6px 12px;
   border-radius:99px;font-weight:700;transition:transform .18s}
@@ -291,7 +304,8 @@ td{padding:12px 10px;border-bottom:1px solid rgba(255,255,255,.06);vertical-alig
 tbody tr{transition:background .16s,transform .16s}
 tbody tr:hover{background:rgba(0,229,255,.07)}
 td.num{text-align:right;font-variant-numeric:tabular-nums;font-weight:700;color:var(--lime);
-       white-space:nowrap;font-size:14px}
+       white-space:nowrap;font-size:15px}
+td.num small{font-size:11px;font-weight:400;color:var(--dim);margin-left:2px}
 .cat{font-size:10px;letter-spacing:.08em;text-transform:uppercase;padding:4px 10px;
      border-radius:99px;white-space:nowrap;font-weight:700;color:#050507;
      background:rgba(255,255,255,.25)}
