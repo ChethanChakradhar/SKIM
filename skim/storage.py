@@ -52,7 +52,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # How to bring an EXISTING database up to each version. Keyed by the
 # version being migrated TO.
@@ -69,6 +69,12 @@ MIGRATIONS = {
     2: [
         # Multi-user, minimally: a display name on each receipt.
         "ALTER TABLE receipts ADD COLUMN uploaded_by TEXT",
+    ],
+    3: [
+        # A name alone cannot keep one person's receipts separate from
+        # another's -- anyone could type any name. A shopper owns their
+        # receipts, and a PIN is what proves it is them.
+        "ALTER TABLE receipts ADD COLUMN shopper_id INTEGER REFERENCES shoppers(shopper_id)",
     ],
 }
 
@@ -114,7 +120,32 @@ CREATE TABLE IF NOT EXISTS receipts (
     -- data is. The receipt image shows where someone shopped, when, and
     -- what they bought, whatever name sits beside it. That is the reason
     -- receipts are deletable, not the name.
-    uploaded_by         TEXT
+    uploaded_by         TEXT,
+    -- Who owns this receipt. Every query a person sees is filtered by
+    -- this, which is what makes "only my analysis" true rather than
+    -- merely displayed.
+    shopper_id          INTEGER REFERENCES shoppers(shopper_id)
+);
+
+-- A person who uploads receipts. Deliberately the smallest identity
+-- that works: a name they pick and a four-digit PIN. No email, no
+-- password reset, no profile.
+--
+-- Four digits is only 10,000 combinations, so the PIN alone is weak --
+-- `failed_attempts` and `locked_until` are what make it usable, by
+-- turning "guess in seconds" into "guess over weeks". The hash is
+-- stored rather than the PIN so a leaked database does not hand over
+-- the PINs directly, even though a four-digit space is brute-forceable
+-- offline. It is the correct habit and costs nothing.
+CREATE TABLE IF NOT EXISTS shoppers (
+    shopper_id      INTEGER PRIMARY KEY,
+    name_key        TEXT NOT NULL UNIQUE,  -- lowercased, for lookup
+    display_name    TEXT NOT NULL,         -- as they typed it
+    pin_hash        TEXT NOT NULL,
+    pin_salt        TEXT NOT NULL,
+    created_at      TEXT NOT NULL,
+    failed_attempts INTEGER NOT NULL DEFAULT 0,
+    locked_until    TEXT
 );
 
 -- A canonical product: the thing whose price is being tracked.
@@ -186,6 +217,7 @@ CREATE INDEX IF NOT EXISTS idx_line_items_receipt ON line_items(receipt_id);
 CREATE INDEX IF NOT EXISTS idx_receipts_date      ON receipts(purchase_date);
 CREATE INDEX IF NOT EXISTS idx_receipts_merchant  ON receipts(merchant_name);
 CREATE INDEX IF NOT EXISTS idx_validation_receipt ON validation_results(receipt_id);
+CREATE INDEX IF NOT EXISTS idx_receipts_shopper    ON receipts(shopper_id);
 """
 
 

@@ -79,15 +79,44 @@ class SchemaTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             storage.connect(self.path)
 
+    # Version 1's schema, frozen as a literal.
+    #
+    # An earlier version of this test derived the old schema by running a
+    # regex over the CURRENT one to strip the newer columns. That broke
+    # the moment version 3 was added -- which is exactly when a migration
+    # test needs to work. A migration test's fixture has to be a snapshot
+    # of what was really there, not something computed from what is there
+    # now, or it only ever tests that today equals today.
+    V1_SCHEMA = """
+    CREATE TABLE schema_version (version INTEGER NOT NULL);
+    CREATE TABLE receipts (
+        receipt_id          INTEGER PRIMARY KEY,
+        source_file         TEXT    NOT NULL UNIQUE,
+        merchant_name       TEXT,
+        store_number        TEXT,
+        purchase_date       TEXT,
+        purchase_time       TEXT,
+        subtotal_cents      INTEGER,
+        tax_cents           INTEGER,
+        total_cents         INTEGER,
+        tax_rate_percent    REAL,
+        amount_paid_cents   INTEGER,
+        change_cents        INTEGER,
+        item_count_printed  INTEGER,
+        currency            TEXT    DEFAULT 'USD',
+        extraction_model    TEXT,
+        prompt_tokens       INTEGER,
+        output_tokens       INTEGER,
+        thinking_tokens     INTEGER,
+        was_deskewed        INTEGER,
+        ingested_at         TEXT    NOT NULL
+    );
+    """
+
     def _make_v1_database(self) -> None:
-        """A database as the previous schema version would have left it."""
-        import re
-        v1 = re.sub(r"    -- Who uploaded this.*?uploaded_by         TEXT\n", "",
-                    storage.SCHEMA, flags=re.S)
-        v1 = v1.replace("ingested_at         TEXT    NOT NULL,",
-                        "ingested_at         TEXT    NOT NULL")
+        """A database as schema version 1 really left it."""
         conn = sqlite3.connect(str(self.path))
-        conn.executescript(v1)
+        conn.executescript(self.V1_SCHEMA)
         conn.execute("INSERT INTO schema_version VALUES (1)")
         conn.execute(
             "INSERT INTO receipts (source_file, merchant_name, total_cents, "
@@ -95,16 +124,24 @@ class SchemaTests(unittest.TestCase):
         conn.commit()
         conn.close()
 
-    def test_an_older_database_is_migrated_in_place(self):
+    def test_an_older_database_is_migrated_all_the_way_up(self):
         # The case that matters: CREATE TABLE IF NOT EXISTS silently does
         # nothing to a table that already exists, so without a migration
         # the new column would never appear and every write to it would
         # fail on exactly the databases that have real data in them.
+        #
+        # Note this crosses TWO versions (1 -> 2 -> 3), which is the real
+        # shape of the problem: someone who has not run the app in a
+        # while is several versions behind, not one.
         self._make_v1_database()
         conn = storage.connect(self.path)
 
         columns = {r["name"] for r in conn.execute("PRAGMA table_info(receipts)")}
-        self.assertIn("uploaded_by", columns)
+        self.assertIn("uploaded_by", columns)   # added in v2
+        self.assertIn("shopper_id", columns)    # added in v3
+        tables = {r["name"] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        self.assertIn("shoppers", tables)       # added in v3
         self.assertEqual(
             conn.execute("SELECT version FROM schema_version").fetchone()["version"],
             storage.SCHEMA_VERSION)
