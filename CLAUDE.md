@@ -50,6 +50,10 @@ Power BI dashboard; Gmail API integration for a personal job-application tracker
 - **Don't let him scope-creep.** A previous project (CivicWatch, a civic-alerts tool) died
   from being too ambitious. Guard against a repeat: ship a thin working slice before adding
   anything.
+- **He has no DevOps or web background.** Docker, hosting, HTTP, auth, CI — explain from
+  the ground up like the CV and software concepts, at every step, including the steps that
+  feel too small to mention. He has asked for guidance at "every instance, every smallest
+  one." Do not hand over a Dockerfile and move on.
 - **Ask before changing dependencies or his environment.** Adding, removing or re-pinning a
   package, or installing into `.venv`, is his call — present the tradeoff and wait. Telling
   him while doing it is not asking. (He called this out when the Gemini SDK was swapped
@@ -75,8 +79,11 @@ Photo -> preprocess -> VLM extraction -> validation -> product normalization
    *(DONE)*
 6. **Unit normalization** — price per ounce, not price per package, or nothing is
    comparable. Watch for weighted items (`0.87 LB @ $3.99`) vs. unit items. *(DONE)*
-7. **Storage** — SQLite to start. *(NEXT)*
-8. **Analysis** — basket index, anomaly detection, forecasting.
+7. **Storage** — SQLite to start. *(DONE)*
+8. **Analysis** — basket index, anomaly detection, forecasting. *(NEXT — but see
+   "Not enough data yet" below: all three receipts are from one day.)*
+9. **Deployment** — Docker, hosting, a web UI so Chethan and then friends can use it.
+   *(A stated goal, not a stretch. See the Deployment section.)*
 
 ## Decisions already made — do not relitigate without new information
 
@@ -496,8 +503,80 @@ Note the AI Studio billing dialog renders its Continue button inside a frame tha
 blockers break — the symptom is a form with no way to proceed. Use
 console.cloud.google.com/billing directly, or an incognito window.
 
-**Next: Step 7 (SQLite storage).** `ProductCache`, `CategoryVocabulary` and `ProductCatalog`
-are JSON files explicitly written to migrate into it — rows plus a blob.
+**Done — Step 7: Storage** (`skim/storage.py`, 16 passing tests, 145 suite-wide)
+
+SQLite from the standard library — no new dependency, one file, no server.
+
+**The schema is designed backwards from the questions**, which is what Step 4 taught. Every
+README question reduces to `(product, date, price-per-unit, store)`, so the schema makes
+that join cheap and the indexes are chosen for those queries rather than for completeness.
+
+- `receipts.source_file` is **UNIQUE**, and saving **deletes before inserting**. Re-running
+  is the normal case here — every prompt change means reprocessing the same photos — and
+  without this, one careless re-run doubles every price in the index silently.
+  `ON DELETE CASCADE` takes line items and validation results with it.
+- **Money is INTEGER cents, except `price_per_base` which is REAL.** Not an inconsistency: it
+  is a derived ratio (dollars per gram, often 0.00154), nothing compares two for equality,
+  and rounding it to cents would destroy it. The rule was "amounts that must reconcile
+  exactly cannot be floats", not "floats are bad".
+- **`PRAGMA foreign_keys = ON` is set explicitly.** SQLite ignores foreign keys per
+  connection by default; without it every cascade in the schema is decoration.
+- **Provenance columns** (`extraction_model`, token counts, `was_deskewed`) exist so the
+  deferred experiments — `thinking_budget=0`, flash-lite, model comparison — become a
+  `GROUP BY` over stored validation results instead of a full reprocessing run.
+- **Validation verdicts are stored, not printed.** The pass rate over time is the project's
+  accuracy metric and can't be computed from terminal output.
+
+Verified: 3 receipts, 37 line items, 30 products, 41 validation results. A second full
+ingest leaves every count identical. All four README questions answer in SQL.
+
+### NOT ENOUGH DATA YET — read before building Step 8
+
+All three receipts are dated **2026-08-25**. One day, three stores, zero repeated products
+across stores. That means these are currently **impossible**, not merely inaccurate:
+
+- price trends over time (needs the same product on ≥2 dates)
+- personal inflation rate (a rate needs two points in time)
+- anomaly detection (needs a baseline distribution)
+- forecasting (needs a series)
+- "what am I due to buy next" (needs purchase intervals)
+
+What IS answerable today: basket composition by category, price-per-unit rankings, spend by
+store, validation pass rate, and the review worklist.
+
+**Do not fake the rest on one day of data.** A forecast from three receipts is a portfolio
+liability, not an asset — it is exactly the thing an interviewer probes and it falls apart.
+The unlock is Chethan photographing receipts for a few weeks, which is also the argument for
+prioritising deployment: he will not reliably use a CLI script, and no data means no Step 8.
+
+---
+
+## Deployment — a stated goal, not a stretch
+
+Chethan wants this **deployed, usable by friends, built with Docker and real tooling**, and
+wants guidance at every step because he has no DevOps or web background.
+
+**"Deployed" and "multi-user" are separate projects, and conflating them is how CivicWatch
+died.** Sequence them:
+
+1. **Thin deploy, single user.** A small web UI (upload a photo, see the parsed receipt,
+   browse prices), Dockerized, hosted somewhere cheap. Days, not weeks. This is what makes
+   him actually use it daily, which is what produces the data Step 8 needs.
+2. **Then Step 8 for real**, on accumulated data.
+3. **Then multi-user, only if it has earned it.**
+
+Decisions that stage 3 forces, recorded now so they are not surprises:
+- **The schema has no `user_id` anywhere.** Deliberately deferred — adding it to a
+  three-receipt database later is a cheap `ALTER TABLE`, and designing auth speculatively is
+  how scope creep starts. But it IS a real change, not a config flag.
+- **SQLite's limits become real.** CLAUDE.md's original note said revisit it when concurrent
+  writers or a hosted dashboard appear. Multi-user makes both true.
+- **Cost stops being his alone.** Friends uploading receipts bills his card at ~1.4¢ each.
+  Needs per-user limits before it is shared, not after.
+- **Other people's receipts are other people's personal data.** Holding his own purchase
+  history is a personal choice; holding a friend's makes him a data controller with real
+  obligations. This is the strongest argument for staying single-user until the thing is
+  genuinely good.
 
 Keep showing before/after images at each stage so Chethan can see each operation doing its
 job rather than taking it on trust. Step 2's stage-by-stage review page:
