@@ -4,26 +4,53 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{% block title %}Skim{% endblock %}</title>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Syne:wght@700;800&family=Space+Mono:wght@400;700&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&family=Space+Mono:wght@400;700&display=swap">
 <link rel="stylesheet" href="/static/skim.css">
 </head>
 <body>
+<span class="blob a"></span><span class="blob b"></span><span class="blob c"></span>
 <div class="wrap">
   <div class="top">
-    <h1 class="logo">Skim<em>.</em></h1>
+    <div>
+      <h1 class="logo">SKIM</h1>
+      <p class="tagline">snap it · we do the maths</p>
+    </div>
     {% if shopper %}
     <div class="who">
       <span class="av">{{ shopper.display_name[0]|upper }}</span>
       <span><b>{{ shopper.display_name }}</b><br>
-        <a href="/logout" style="font-size:11px;color:var(--dim)">sign out</a></span>
+        <a href="/logout">sign out</a></span>
     </div>
     {% endif %}
   </div>
   {% block content %}{% endblock %}
   <div class="foot">
-    <span>You skim the receipt, the app skims the prices.</span>
-    <span>Prices normalised per 100g so packages are comparable.</span>
+    <span>Skim — The One Where You Stop Overpaying</span>
   </div>
 </div>
+<script>
+  // Numbers count up on arrival. Small thing, but a figure that lands
+  // rather than just appearing is what makes a page feel alive.
+  const ease = x => 1 - Math.pow(1 - x, 3);
+  document.querySelectorAll('[data-count]').forEach(el => {
+    const target = parseFloat(el.dataset.count);
+    if (!isFinite(target)) return;
+    const prefix = el.dataset.prefix || '';
+    const suffix = el.dataset.suffix || '';
+    const dp = (el.dataset.dp | 0);
+    const t0 = performance.now(), dur = 900;
+    const tick = now => {
+      const k = Math.min(1, (now - t0) / dur);
+      el.textContent = prefix + (target * ease(k)).toFixed(dp) + suffix;
+      if (k < 1) requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  });
+
+  // Receipt lines print one after another, like the paper coming out.
+  document.querySelectorAll('.paper .r-row').forEach((row, i) => {
+    row.style.animationDelay = (i * 45) + 'ms';
+  });
+</script>
 </body>
 </html>

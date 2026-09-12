@@ -1,43 +1,56 @@
 {% extends "base.html" %}
 {% block content %}
-<section class="panel rise">
-  <div class="bar">Get in <span class="right">◢</span></div>
-  <div class="body">
-    <p class="note" style="margin-top:0">Pick a name and a 4-digit PIN. If the name is new
-    it's yours from now on. <b>Your receipts are only visible to you.</b></p>
-    {% if error %}<div class="err" style="margin-bottom:14px">{{ error }}</div>{% endif %}
+<section class="scandeck pop">
+  <div class="inner">
+    <span class="beam"></span>
+    <span class="corner tl"></span><span class="corner tr"></span>
+    <span class="corner bl"></span><span class="corner br"></span>
+
+    <div class="readout"><i></i> Scanner ready — step up</div>
+    <h2>How <em style="font-style:normal;color:var(--cyan)">you</em> doin'?</h2>
+    <p class="lead">A name and 4 numbers. That's the whole sign-up.</p>
+    <p class="lead" style="margin-bottom:22px"><b style="color:var(--lime)">JOEY DOESN'T
+    SHARE FOOD!</b><br>Skim doesn't share your receipts. Yours are yours.</p>
+
+    {% if error %}<div class="err" style="margin-bottom:16px">{{ error }}</div>{% endif %}
+
     <form method="post" action="/signin">
       <div class="row2">
         <label class="field">
           <span>Name</span>
           <input type="text" name="name" required autofocus autocomplete="username"
-                 placeholder="Chethan" maxlength="24">
+                 placeholder="e.g. Chandler" maxlength="24">
         </label>
         <label class="field">
-          <span>PIN</span>
+          <span>4 digits</span>
           <input class="pin" type="password" name="pin" required inputmode="numeric"
                  pattern="[0-9]{4}" maxlength="4" placeholder="••••"
                  autocomplete="current-password">
         </label>
       </div>
-      <button class="btn" type="submit">Start skimming</button>
+      <button class="btn" type="submit">Let me in</button>
     </form>
-    <p class="note">Five wrong PINs locks a name for 15 minutes — that's what keeps four
-    digits from being guessable. There's no reset, so pick one you'll remember.</p>
+    <p class="note">Get it wrong 5 times and that name takes a 15 minute nap — keeps
+    strangers from guessing their way in. <b>There's no reset button, so don't pick
+    something clever you'll forget.</b></p>
   </div>
 </section>
 
-<section class="panel cy rise">
-  <div class="bar">What this does <span class="right">◢</span></div>
+<section class="panel mg pop">
+  <div class="bar">So what is this? <span class="right">↓</span></div>
   <div class="body">
-    <div class="stats">
-      <div class="stat"><b>{{ receipt_count }}</b><span>receipts read</span></div>
-      <div class="stat cy"><b>{{ product_count }}</b><span>products tracked</span></div>
-      <div class="stat mg"><b>6s</b><span>per receipt</span></div>
+    <div class="stats" style="margin-bottom:18px">
+      <div class="stat"><b data-count="{{ receipt_count }}">0</b><span>receipts read</span></div>
+      <div class="stat vi"><b data-count="{{ product_count }}">0</b><span>things it knows</span></div>
+      <div class="stat mg"><b data-count="6" data-suffix="s">0</b><span>seconds a receipt</span></div>
     </div>
-    <p class="note">Photograph a receipt. Skim reads every line, checks the arithmetic against
-    the printed totals, works out what each item costs <b>per 100g</b>, and remembers it — so
-    "what did I pay for milk in March vs August" becomes a question you can actually answer.</p>
+    <p class="note" style="margin-top:0;font-size:14px">
+      Snap a photo of your receipt. Skim reads every line for you and works out what
+      things really cost — so two different sized packs can finally be compared properly.</p>
+    <p class="note">Could your shopping <b>BE</b> any more expensive? Now you'll actually
+    know why.</p>
+    <p class="note">And when your usual stuff creeps up in price, Skim tells you.
+    You and your grocery bill: <b>WE WERE ON A BREAK!</b></p>
   </div>
 </section>
 {% endblock %}

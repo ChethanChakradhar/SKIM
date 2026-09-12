@@ -4,30 +4,31 @@
 <div class="err">{{ request.query_params.get('error') }}</div>
 {% endif %}
 
-<section class="panel mg rise">
-  <div class="bar">Drop a receipt in <span class="right">◢</span></div>
+<section class="panel mg pop">
+  <div class="bar">Feed it a receipt <span class="right">↓</span></div>
   <div class="body">
     <form method="post" action="/upload" enctype="multipart/form-data" id="up">
       <label class="drop" id="zone">
-        <div class="big">Drop a receipt</div>
-        <small>jpg · png · heic — straight off your phone</small>
+        <div class="icon">🧾</div>
+        <div class="big">Chuck a receipt in here</div>
+        <small>drag it, or tap to pick one off your phone</small>
         <span class="chosen" id="chosen" hidden></span>
         <input type="file" name="photo" accept="image/*" required id="file">
       </label>
       <button class="btn" type="submit" id="go" style="margin-top:14px">Skim it</button>
     </form>
-    <p class="note">Takes about six seconds to read. Per-100g prices fill in a moment later,
-    while you're already looking at the lines.</p>
+    <p class="note">Six seconds and every line shows up. The "was that a ripoff" maths
+    lands a moment later — no need to stand there watching it.</p>
   </div>
 </section>
 
-<section class="panel rise">
-  <div class="bar">Your receipts <span class="right">{{ receipts|length }}</span></div>
+<section class="panel pop">
+  <div class="bar">Your haul <span class="right">{{ receipts|length }}</span></div>
   <div class="body">
     <div class="stats" style="margin-bottom:16px">
-      <div class="stat"><b>{{ receipts|length }}</b><span>receipts</span></div>
-      <div class="stat cy"><b>${{ '%.2f'|format(spend_cents / 100) }}</b><span>total spend</span></div>
-      <div class="stat mg"><b>{{ prices|length }}</b><span>priced items</span></div>
+      <div class="stat"><b data-count="{{ receipts|length }}">0</b><span>shops done</span></div>
+      <div class="stat vi"><b data-count="{{ spend_cents / 100 }}" data-prefix="$" data-dp="2">$0.00</b><span>damage so far</span></div>
+      <div class="stat mg"><b data-count="{{ prices|length }}">0</b><span>things priced</span></div>
     </div>
     {% if receipts %}
     <div class="list">
@@ -40,14 +41,14 @@
       {% endfor %}
     </div>
     {% else %}
-    <p class="empty">Nothing yet. Drop your first receipt in above.</p>
+    <p class="empty">Could there <b>BE</b> any fewer receipts in here?</p>
     {% endif %}
   </div>
 </section>
 
 {% if prices %}
-<section class="panel cy rise">
-  <div class="bar">What you actually pay <span class="right">per 100g</span></div>
+<section class="panel cy pop">
+  <div class="bar">What it really costs <span class="right">per 100g</span></div>
   <div class="body">
     <div class="tblwrap">
       <table>
@@ -69,12 +70,29 @@
         </tbody>
       </table>
     </div>
-    <p class="note">Only weight-based items compare here — price per gram and price per item
-    aren't the same kind of number, so they're never mixed.
-    <b>↯ assumed</b> means the register printed no unit and pounds were inferred.</p>
+    <p class="note">Everything's priced the same way here, so a big bag and a small bag
+    finally have to fight it out fairly.
+    <b>↯ assumed</b> just means the receipt didn't say whether it weighed things in pounds,
+    so we went with pounds.</p>
   </div>
 </section>
 {% endif %}
+
+<div class="scanner" id="scanner" aria-hidden="true">
+  <div class="scan-stage">
+    <div class="scan-doc">
+      <span class="grid"></span>
+      <span class="laser"></span>
+      <span class="bracket tl"></span><span class="bracket tr"></span>
+      <span class="bracket bl"></span><span class="bracket br"></span>
+    </div>
+    <div class="scan-meter"><i></i></div>
+    <div class="scan-text">
+      <div class="stage" id="scanStage">Reading the paper</div>
+      <div class="sub" id="scanSub">finding the edges and straightening it out</div>
+    </div>
+  </div>
+</div>
 
 <script>
   const zone = document.getElementById('zone');
@@ -94,10 +112,28 @@
     chosen.textContent = '✓ ' + file.files[0].name;
   });
 
+  // The scanner runs while the upload is in flight. The stages are the
+  // real pipeline steps, paced to roughly how long each one takes, so
+  // the wait shows what is happening rather than just that something is.
+  const STAGES = [
+    ['Reading the paper',   'finding the edges and straightening it out',   0],
+    ['Pulling the lines',   'every item, price and tax flag',            1800],
+    ['Checking the maths',  'do the lines add up to the printed total?',  5200],
+    ['Naming the products', 'decoding what the abbreviations mean',       7400],
+  ];
+  const scanner = document.getElementById('scanner');
+  const stageEl = document.getElementById('scanStage');
+  const subEl   = document.getElementById('scanSub');
+
   form.addEventListener('submit', () => {
-    zone.classList.add('busy');
     go.disabled = true;
-    go.textContent = 'Reading it…';
+    go.textContent = 'Scanning…';
+    scanner.classList.add('on');
+    scanner.setAttribute('aria-hidden', 'false');
+    STAGES.forEach(([stage, sub, delay]) => setTimeout(() => {
+      stageEl.textContent = stage;
+      subEl.textContent = sub;
+    }, delay));
   });
 </script>
 {% endblock %}

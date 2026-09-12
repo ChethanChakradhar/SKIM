@@ -1,17 +1,17 @@
 {% extends "base.html" %}
 {% block content %}
 {% if pending %}
-<div class="pending rise">
-  <span class="dot">●</span>
-  <span><b>Working out per-100g prices</b> for {{ pending }} item{{ '' if pending == 1 else 's' }}…
-  this page refreshes itself.</span>
+<div class="pending pop">
+  <span class="spinner"></span>
+  <span><b>Still working out what {{ pending }} thing{{ '' if pending == 1 else 's' }}
+  actually cost</b> — hang on, this page updates itself.</span>
 </div>
 <meta http-equiv="refresh" content="6">
 {% endif %}
 
-<section class="panel cy rise">
+<section class="panel cy pop">
   <div class="bar">{{ receipt.merchant_name or 'Receipt' }}
-    <span class="right">{{ passed }}/{{ ran }} checks</span></div>
+    <span class="right">{{ passed }}/{{ ran }} checks passed</span></div>
   <div class="body">
     <div class="paper">
       <div class="r-head">
@@ -43,17 +43,17 @@
             title="{{ c.detail }}">{{ c.check_name.replace('_', ' ') }}</span>
       {% endfor %}
     </div>
-    <p class="note">Checks compare the receipt against itself — do the lines sum to the printed
-    subtotal, does subtotal plus tax equal the total, does the change reconcile. They catch a
-    misread digit without anyone labelling anything.
-    {% if ran and passed == ran %}<b>Everything reconciles here.</b>{% endif %}</p>
+    <p class="note">Those chips are Skim double-checking itself: do the lines add up to the
+    total printed on the paper? Did the change come back right? If it misread a number,
+    the sums stop matching and it says so.
+    {% if ran and passed == ran %}<b>All good on this one.</b>{% endif %}</p>
   </div>
 </section>
 
 {% set priced = items | selectattr('price_per_base') | list %}
 {% if priced %}
-<section class="panel rise">
-  <div class="bar">Per unit <span class="right">◢</span></div>
+<section class="panel pop">
+  <div class="bar">What each thing really cost <span class="right">↓</span></div>
   <div class="body">
     <div class="tblwrap">
       <table>
@@ -76,15 +76,15 @@
 </section>
 {% endif %}
 
-<section class="panel mg rise">
-  <div class="body" style="display:flex;flex-wrap:wrap;gap:12px;align-items:center">
-    <a class="btn small" href="/me" style="text-decoration:none;text-align:center">← Back to your receipts</a>
+<section class="panel mg pop">
+  <div class="body actions">
+    <a class="btn small" href="/me" style="text-decoration:none;text-align:center">← Back to your haul</a>
     <form method="post" action="/receipt/{{ receipt.receipt_id }}/delete"
-          onsubmit="return confirm('Delete this receipt and its photo? This cannot be undone.')">
-      <button class="btn small ghost" type="submit">Delete this receipt</button>
+          onsubmit="return confirm('Bin this receipt and its photo? No undo.')">
+      <button class="btn small ghost" type="submit">Bin this one</button>
     </form>
-    <span class="note" style="margin:0;flex:1;min-width:200px">Deleting removes the photo too,
-    not just the row.</span>
+    <span class="note" style="margin:0;flex:1;min-width:200px">Binning it deletes the photo
+    as well — properly gone, not just hidden.</span>
   </div>
 </section>
 {% endblock %}
