@@ -1,0 +1,22 @@
+# Anything not needed to RUN the app. Every excluded file is one Docker
+# does not have to send to the daemon or store in a layer.
+.venv/
+__pycache__/
+*.pyc
+.git/
+.pytest_cache/
+
+# Real receipts and the database. Personal data has no business being
+# baked into an image that gets pushed to a registry.
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# Secrets. The API key is injected as an environment variable at
+# runtime; an image containing .env would leak it to anyone who pulls it.
+.env
+
+tests/
+scripts/
+CLAUDE.md

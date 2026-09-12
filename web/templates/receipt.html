@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% block content %}
+{% if pending %}
+<div class="pending rise">
+  <span class="dot">●</span>
+  <span><b>Working out per-100g prices</b> for {{ pending }} item{{ '' if pending == 1 else 's' }}…
+  this page refreshes itself.</span>
+</div>
+<meta http-equiv="refresh" content="6">
+{% endif %}
+
+<section class="panel cy rise">
+  <div class="bar">{{ receipt.merchant_name or 'Receipt' }}
+    <span class="right">{{ passed }}/{{ ran }} checks</span></div>
+  <div class="body">
+    <div class="paper">
+      <div class="r-head">
+        <strong>{{ receipt.merchant_name or 'Unknown store' }}</strong>
+        <span>{{ receipt.purchase_date or '—' }}{% if receipt.purchase_time %} · {{ receipt.purchase_time }}{% endif %}
+        {% if receipt.store_number %} · store {{ receipt.store_number }}{% endif %}</span>
+      </div>
+      {% for i in items %}
+      <div class="r-row {{ 'void' if i.is_voided }}">
+        <span class="nm">{{ i.raw_description }}</span>
+        <span class="qty">{% if i.quantity and i.unit_price_cents %}{{ '%g'|format(i.quantity) }} @ {{ '%.2f'|format(i.unit_price_cents / 100) }}{% endif %}</span>
+        <span class="amt">{% if i.line_total_cents is not none %}{{ '%.2f'|format(i.line_total_cents / 100) }}{% else %}—{% endif %}</span>
+      </div>
+      {% endfor %}
+      <div class="r-sep"></div>
+      {% if receipt.subtotal_cents is not none %}
+      <div class="r-sub"><span>Subtotal</span><span>{{ '%.2f'|format(receipt.subtotal_cents / 100) }}</span></div>
+      {% endif %}
+      {% if receipt.tax_cents is not none %}
+      <div class="r-sub"><span>Tax</span><span>{{ '%.2f'|format(receipt.tax_cents / 100) }}</span></div>
+      {% endif %}
+      <div class="r-tot"><span>TOTAL</span>
+        <span>{{ '%.2f'|format((receipt.total_cents or 0) / 100) }}</span></div>
+    </div>
+
+    <div class="chips">
+      {% for c in checks %}
+      <span class="chip {{ 'ok' if c.status == 'pass' else ('fail' if c.status == 'fail' else 'na') }}"
+            title="{{ c.detail }}">{{ c.check_name.replace('_', ' ') }}</span>
+      {% endfor %}
+    </div>
+    <p class="note">Checks compare the receipt against itself — do the lines sum to the printed
+    subtotal, does subtotal plus tax equal the total, does the change reconcile. They catch a
+    misread digit without anyone labelling anything.
+    {% if ran and passed == ran %}<b>Everything reconciles here.</b>{% endif %}</p>
+  </div>
+</section>
+
+{% set priced = items | selectattr('price_per_base') | list %}
+{% if priced %}
+<section class="panel rise">
+  <div class="bar">Per unit <span class="right">◢</span></div>
+  <div class="body">
+    <div class="tblwrap">
+      <table>
+        <thead><tr><th>Item</th><th>Category</th><th>Amount</th>
+          <th style="text-align:right">Per 100g</th></tr></thead>
+        <tbody>
+          {% for i in priced %}
+          <tr>
+            <td>{{ i.canonical_text or i.raw_description }}
+              {% if i.inferred_unit %}<span class="assumed">↯ {{ i.inferred_unit }} assumed</span>{% endif %}</td>
+            <td>{% if i.category %}<span class="cat {{ i.category }}">{{ i.category }}</span>{% endif %}</td>
+            <td>{% if i.base_quantity %}{{ '%.0f'|format(i.base_quantity) }} {{ i.base_unit }}{% endif %}</td>
+            <td class="num">{% if i.dimension == 'weight' %}${{ '%.3f'|format(i.price_per_base * 100) }}{% else %}—{% endif %}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+{% endif %}
+
+<section class="panel mg rise">
+  <div class="body" style="display:flex;flex-wrap:wrap;gap:12px;align-items:center">
+    <a class="btn small" href="/me" style="text-decoration:none;text-align:center">← Back to your receipts</a>
+    <form method="post" action="/receipt/{{ receipt.receipt_id }}/delete"
+          onsubmit="return confirm('Delete this receipt and its photo? This cannot be undone.')">
+      <button class="btn small ghost" type="submit">Delete this receipt</button>
+    </form>
+    <span class="note" style="margin:0;flex:1;min-width:200px">Deleting removes the photo too,
+    not just the row.</span>
+  </div>
+</section>
+{% endblock %}

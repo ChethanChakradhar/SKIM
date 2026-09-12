@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+{% block content %}
+{% if request.query_params.get('error') %}
+<div class="err">{{ request.query_params.get('error') }}</div>
+{% endif %}
+
+<section class="panel mg rise">
+  <div class="bar">Drop a receipt in <span class="right">◢</span></div>
+  <div class="body">
+    <form method="post" action="/upload" enctype="multipart/form-data" id="up">
+      <label class="drop" id="zone">
+        <div class="big">Drop a receipt</div>
+        <small>jpg · png · heic — straight off your phone</small>
+        <span class="chosen" id="chosen" hidden></span>
+        <input type="file" name="photo" accept="image/*" required id="file">
+      </label>
+      <button class="btn" type="submit" id="go" style="margin-top:14px">Skim it</button>
+    </form>
+    <p class="note">Takes about six seconds to read. Per-100g prices fill in a moment later,
+    while you're already looking at the lines.</p>
+  </div>
+</section>
+
+<section class="panel rise">
+  <div class="bar">Your receipts <span class="right">{{ receipts|length }}</span></div>
+  <div class="body">
+    <div class="stats" style="margin-bottom:16px">
+      <div class="stat"><b>{{ receipts|length }}</b><span>receipts</span></div>
+      <div class="stat cy"><b>${{ '%.2f'|format(spend_cents / 100) }}</b><span>total spend</span></div>
+      <div class="stat mg"><b>{{ prices|length }}</b><span>priced items</span></div>
+    </div>
+    {% if receipts %}
+    <div class="list">
+      {% for r in receipts %}
+      <a class="item" href="/receipt/{{ r.receipt_id }}">
+        <b>{{ r.merchant_name or 'Unknown store' }}</b>
+        <span class="meta">{{ r.purchase_date or '—' }} · {{ r.items }} lines</span>
+        <span class="amt">${{ '%.2f'|format((r.total_cents or 0) / 100) }}</span>
+      </a>
+      {% endfor %}
+    </div>
+    {% else %}
+    <p class="empty">Nothing yet. Drop your first receipt in above.</p>
+    {% endif %}
+  </div>
+</section>
+
+{% if prices %}
+<section class="panel cy rise">
+  <div class="bar">What you actually pay <span class="right">per 100g</span></div>
+  <div class="body">
+    <div class="tblwrap">
+      <table>
+        <thead><tr><th>Product</th><th>Category</th><th>Store</th><th>When</th>
+          <th style="text-align:right">Per 100g</th></tr></thead>
+        <tbody>
+          {% for p in prices %}
+          {% if p.dimension == 'weight' %}
+          <tr>
+            <td>{{ p.canonical_text }}
+              {% if p.inferred_unit %}<span class="assumed">↯ {{ p.inferred_unit }} assumed</span>{% endif %}</td>
+            <td>{% if p.category %}<span class="cat {{ p.category }}">{{ p.category }}</span>{% endif %}</td>
+            <td>{{ p.merchant_name or '—' }}</td>
+            <td>{{ p.purchase_date or '—' }}</td>
+            <td class="num">${{ '%.3f'|format(p.price_per_base * 100) }}</td>
+          </tr>
+          {% endif %}
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <p class="note">Only weight-based items compare here — price per gram and price per item
+    aren't the same kind of number, so they're never mixed.
+    <b>↯ assumed</b> means the register printed no unit and pounds were inferred.</p>
+  </div>
+</section>
+{% endif %}
+
+<script>
+  const zone = document.getElementById('zone');
+  const file = document.getElementById('file');
+  const chosen = document.getElementById('chosen');
+  const form = document.getElementById('up');
+  const go = document.getElementById('go');
+
+  ['dragenter','dragover'].forEach(e => zone.addEventListener(e, ev => {
+    ev.preventDefault(); zone.classList.add('over');
+  }));
+  ['dragleave','drop'].forEach(e => zone.addEventListener(e, () => zone.classList.remove('over')));
+
+  file.addEventListener('change', () => {
+    if (!file.files.length) return;
+    chosen.hidden = false;
+    chosen.textContent = '✓ ' + file.files[0].name;
+  });
+
+  form.addEventListener('submit', () => {
+    zone.classList.add('busy');
+    go.disabled = true;
+    go.textContent = 'Reading it…';
+  });
+</script>
+{% endblock %}

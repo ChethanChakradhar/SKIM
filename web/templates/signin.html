@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel rise">
+  <div class="bar">Get in <span class="right">◢</span></div>
+  <div class="body">
+    <p class="note" style="margin-top:0">Pick a name and a 4-digit PIN. If the name is new
+    it's yours from now on. <b>Your receipts are only visible to you.</b></p>
+    {% if error %}<div class="err" style="margin-bottom:14px">{{ error }}</div>{% endif %}
+    <form method="post" action="/signin">
+      <div class="row2">
+        <label class="field">
+          <span>Name</span>
+          <input type="text" name="name" required autofocus autocomplete="username"
+                 placeholder="Chethan" maxlength="24">
+        </label>
+        <label class="field">
+          <span>PIN</span>
+          <input class="pin" type="password" name="pin" required inputmode="numeric"
+                 pattern="[0-9]{4}" maxlength="4" placeholder="••••"
+                 autocomplete="current-password">
+        </label>
+      </div>
+      <button class="btn" type="submit">Start skimming</button>
+    </form>
+    <p class="note">Five wrong PINs locks a name for 15 minutes — that's what keeps four
+    digits from being guessable. There's no reset, so pick one you'll remember.</p>
+  </div>
+</section>
+
+<section class="panel cy rise">
+  <div class="bar">What this does <span class="right">◢</span></div>
+  <div class="body">
+    <div class="stats">
+      <div class="stat"><b>{{ receipt_count }}</b><span>receipts read</span></div>
+      <div class="stat cy"><b>{{ product_count }}</b><span>products tracked</span></div>
+      <div class="stat mg"><b>6s</b><span>per receipt</span></div>
+    </div>
+    <p class="note">Photograph a receipt. Skim reads every line, checks the arithmetic against
+    the printed totals, works out what each item costs <b>per 100g</b>, and remembers it — so
+    "what did I pay for milk in March vs August" becomes a question you can actually answer.</p>
+  </div>
+</section>
+{% endblock %}

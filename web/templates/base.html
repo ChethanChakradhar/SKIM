@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{% block title %}Skim{% endblock %}</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Syne:wght@700;800&family=Space+Mono:wght@400;700&display=swap">
+<link rel="stylesheet" href="/static/skim.css">
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <h1 class="logo">Skim<em>.</em></h1>
+    {% if shopper %}
+    <div class="who">
+      <span class="av">{{ shopper.display_name[0]|upper }}</span>
+      <span><b>{{ shopper.display_name }}</b><br>
+        <a href="/logout" style="font-size:11px;color:var(--dim)">sign out</a></span>
+    </div>
+    {% endif %}
+  </div>
+  {% block content %}{% endblock %}
+  <div class="foot">
+    <span>You skim the receipt, the app skims the prices.</span>
+    <span>Prices normalised per 100g so packages are comparable.</span>
+  </div>
+</div>
+</body>
+</html>
