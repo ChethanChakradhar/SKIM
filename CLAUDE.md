@@ -72,10 +72,10 @@ Photo -> preprocess -> VLM extraction -> validation -> product normalization
    accuracy signal with no labeling required. Flag failures for review. *(DONE)*
 5. **Product normalization** — resolve `GV MLK 2% 1GAL` and `GREAT VAL MILK 2% GALLON` to
    one canonical product. **This is the hard part and the heart of the project.**
-   *(parser DONE, matcher NEXT — blocked on API quota)*
+   *(DONE)*
 6. **Unit normalization** — price per ounce, not price per package, or nothing is
    comparable. Watch for weighted items (`0.87 LB @ $3.99`) vs. unit items. *(DONE)*
-7. **Storage** — SQLite to start. *(NEXT unblocked step)*
+7. **Storage** — SQLite to start. *(NEXT)*
 8. **Analysis** — basket index, anomaly detection, forecasting.
 
 ## Decisions already made — do not relitigate without new information
@@ -360,32 +360,78 @@ can see this failure mode. Deliberately deferred — with three receipts there i
 measure how often drift actually matters. Revisit at ~30 receipts and measure the drift
 rate rather than guessing at it.
 
-**In progress — Step 5: Product normalization** (`skim/normalize.py`, parser done)
+**Done — Step 5: Product normalization** (`skim/normalize.py` + `skim/match.py`, 129 tests)
 
-**The approach was chosen by experiment, not intuition.** Measured on real strings from the
-first three receipts:
+**The approach was chosen by experiment, not intuition — and the first experiment was
+misleading.** Raw-string matching is unusable, measured on real strings:
 
 | | same-product pairs | *different*-product pairs |
 |---|---|---|
 | character fuzzy (stdlib difflib) | 0.63 | — |
 | embedding the **raw** string | 0.61 | **0.66** |
-| embedding the **parsed** form | **0.96** | 0.66 |
 
-Raw-string matching is unusable: true-match scores overlap false-match scores, so no
-threshold exists. `PLUM TOMATO` vs `GUAVA` scores 0.66 — higher than `BNLS CK BRST` scores
-against `BONELESS CHICKEN BREAST`. The reason matters: **embeddings measure semantic
-relatedness; entity resolution needs identity.** Two fruits are genuinely related and an
-abbreviation is genuinely dissimilar to its expansion, so the signal points the wrong way.
+True-match scores overlap false-match scores, so no threshold exists. `PLUM TOMATO` vs
+`GUAVA` scores 0.66. **Embeddings measure semantic relatedness; entity resolution needs
+identity** — two fruits are genuinely related and an abbreviation is genuinely dissimilar to
+its expansion, so the signal points the wrong way.
 
-Parsing first opens a clean 0.30 margin. Hence the architecture: **parse, then embed.**
+A follow-up test on four hand-written pairs suggested parsing first opened a "clean 0.30
+margin". **That was wrong, and the mistake is worth remembering:** those four pairs were
+near-paraphrases with no near-neighbours in the set. Re-measured on all 465 pairs of the 33
+real products:
+
+```
+0.839  guava                  <-> guava 1 each              SAME
+0.828  skinless whole chicken <-> boneless chicken breast   DIFFERENT
+0.718  kitchen towel sent/pet <-> kitchen towel solid blk   DIFFERENT
+```
+
+**The true match and the nearest false match are 0.011 apart.** Real catalogs contain
+near-neighbours — two chickens, two kitchen towels, a dozen produce items — and those are
+exactly the pairs that sit where a threshold would need to go. A test set without them
+measures nothing. *Build the evaluation set from the real distribution, not from examples
+that illustrate the point you already believe.*
+
+So the architecture separates retrieval from decision:
 
 ```
 raw string -> [1] parse to attributes -> [2] embed parsed form
-           -> [3] cosine retrieve candidates -> [4] threshold + attribute agreement
-           -> [5] human confirms ambiguous -> catalog
+           -> [3] cosine retrieve top-k CANDIDATES   (narrows; never concludes)
+           -> [4a] compare structured fields          (deterministic, settles most)
+           -> [4b] model adjudicates what's left      (only differing product nouns)
+           -> [5] human confirms anything still unsure
 ```
 
-Stage 1 is built. Stages 2-5 are not.
+**This is the real argument for parsing first:** not that embeddings score better on parsed
+text, but that parsing produces fields you can compare *deterministically*. The chickens
+differ in `product`; the guavas share it and differ only in a size the register invented.
+
+Decision rules in `compare_attributes`:
+- Different **brand** or **variant** → different product. A brand present on one side and
+  absent on the other is **not** a conflict; receipts routinely omit one.
+- **Different size is the SAME product.** Counter-intuitive and load-bearing: Step 6 already
+  converted both to a price per base unit, so a gallon and a quart are one product bought in
+  two amounts. Splitting them would defeat the purpose of normalizing units. This is the
+  rule that merges `GUAVA` with `GUAVA - 1`.
+- Differing product nouns → adjudicator, because `chili`/`chilli` is spelling while
+  `whole chicken`/`chicken breast` is not.
+- `UNSURE` → review, never merged. An unresolved near-match is exactly where a wrong merge
+  would go unnoticed.
+
+**Result on real data:** 30 canonical products from 33 strings; guava merged, chickens
+stayed separate, 2 flagged for review (`BLUE BANDED`, `1PK INC AUTO` — both genuinely
+ambiguous, both declined twice including with sibling-item context).
+
+**Known gap:** the adjudicator never fired on this data — the chickens were settled by a
+variant conflict (`boneless` vs `skinless`) before it was reached. It is currently exercised
+only by stubbed tests, and its first real test will be two products sharing a variant but
+differing in noun.
+
+**On scale, deliberately:** at ~2,000 unique products the whole index is 24 MB of numpy and
+retrieval is one matrix-vector product. **No vector database, no FAISS, no ANN index.** The
+blocking literature (SC-Block, WDC-B) exists for 200-billion-comparison problems. Reaching
+for it here would be resume-driven architecture, and being able to say why is a better
+interview answer than having built it.
 
 **On scale, deliberately:** at ~2,000 unique products the whole index is 24 MB of numpy and
 candidate retrieval is one matrix-vector product. **No vector database, no FAISS, no ANN
@@ -436,24 +482,22 @@ Verified on real lines: onions $0.154/100g, plum tomato $0.284/100g, paneer $1.5
 with the 2-pack of paneer correctly counted as 28 oz. `KITCHEN TOWEL 15X25` is declined
 outright — price-per-inch is not a number anyone wants, and declining beats inventing.
 
-### BLOCKED — free-tier quota makes Step 5 unrunnable
+### Billing: now on the PAID tier (Sept 2026)
 
-`gemini-3.6-flash` free tier allows **20 requests per day per model** (and 5/minute). One
-receipt costs 1 extraction + up to 18 parse calls = **19 calls, so one receipt per day.**
-Iterating on a prompt needs 35 calls, i.e. two days per iteration.
+The free tier allowed **20 requests per day per model** (and 5/minute), which is one receipt
+per day — extraction plus ~18 parse calls. Billing is now linked, which also resolves the
+privacy problem: paid-tier prompts and images are not used to improve Google's products.
 
-`DailyQuotaExhaustedError` now fails immediately rather than retrying — per-day and
-per-minute quotas both arrive as 429 with a stated `retryDelay`, and only the `quotaId`
+`DailyQuotaExhaustedError` fails immediately rather than retrying, since per-day and
+per-minute quotas both arrive as 429 with a stated `retryDelay` and only the `quotaId`
 distinguishes them. Waiting 58s does not restore a day's allowance.
 
-Chethan attempted to link billing and **got stuck on the Google Cloud country/payment form**.
-Workarounds not yet tried: create the billing account directly at
-console.cloud.google.com/billing rather than through the AI Studio embed; check for an
-unticked ToS box below the fold; disable ad blockers (they break Google's payment iframes).
+Note the AI Studio billing dialog renders its Continue button inside a frame that ad
+blockers break — the symptom is a form with no way to proceed. Use
+console.cloud.google.com/billing directly, or an incognito window.
 
-**Next unblocked work: Step 7 (SQLite storage).** It needs no API calls, and Step 5's
-`ProductCache` and `CategoryVocabulary` are currently JSON files explicitly meant to migrate
-into it.
+**Next: Step 7 (SQLite storage).** `ProductCache`, `CategoryVocabulary` and `ProductCatalog`
+are JSON files explicitly written to migrate into it — rows plus a blob.
 
 Keep showing before/after images at each stage so Chethan can see each operation doing its
 job rather than taking it on trust. Step 2's stage-by-stage review page:
