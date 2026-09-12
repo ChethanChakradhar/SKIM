@@ -69,13 +69,58 @@ class SchemaTests(unittest.TestCase):
         self.assertEqual(
             conn.execute("SELECT COUNT(*) FROM schema_version").fetchone()[0], 1)
 
-    def test_an_unknown_schema_version_fails_loudly(self):
+    def test_a_database_from_the_future_is_refused(self):
+        # Writing through a schema this code does not understand risks
+        # producing rows the newer code cannot read back.
         conn = storage.connect(self.path)
         conn.execute("UPDATE schema_version SET version = 99")
         conn.commit()
         conn.close()
         with self.assertRaises(RuntimeError):
             storage.connect(self.path)
+
+    def _make_v1_database(self) -> None:
+        """A database as the previous schema version would have left it."""
+        import re
+        v1 = re.sub(r"    -- Who uploaded this.*?uploaded_by         TEXT\n", "",
+                    storage.SCHEMA, flags=re.S)
+        v1 = v1.replace("ingested_at         TEXT    NOT NULL,",
+                        "ingested_at         TEXT    NOT NULL")
+        conn = sqlite3.connect(str(self.path))
+        conn.executescript(v1)
+        conn.execute("INSERT INTO schema_version VALUES (1)")
+        conn.execute(
+            "INSERT INTO receipts (source_file, merchant_name, total_cents, "
+            "ingested_at) VALUES ('OLD.jpg', 'Walmart', 4377, '2026-01-01')")
+        conn.commit()
+        conn.close()
+
+    def test_an_older_database_is_migrated_in_place(self):
+        # The case that matters: CREATE TABLE IF NOT EXISTS silently does
+        # nothing to a table that already exists, so without a migration
+        # the new column would never appear and every write to it would
+        # fail on exactly the databases that have real data in them.
+        self._make_v1_database()
+        conn = storage.connect(self.path)
+
+        columns = {r["name"] for r in conn.execute("PRAGMA table_info(receipts)")}
+        self.assertIn("uploaded_by", columns)
+        self.assertEqual(
+            conn.execute("SELECT version FROM schema_version").fetchone()["version"],
+            storage.SCHEMA_VERSION)
+
+    def test_migrating_preserves_existing_rows(self):
+        self._make_v1_database()
+        conn = storage.connect(self.path)
+        row = conn.execute("SELECT * FROM receipts").fetchone()
+        self.assertEqual(row["source_file"], "OLD.jpg")
+        self.assertEqual(row["total_cents"], 4377)
+        self.assertIsNone(row["uploaded_by"])
+
+    def test_migrating_twice_is_harmless(self):
+        self._make_v1_database()
+        storage.connect(self.path).close()
+        storage.connect(self.path).close()  # must not re-run the ALTER TABLE
 
 
 class ReceiptWriteTests(unittest.TestCase):
@@ -124,6 +169,45 @@ class ReceiptWriteTests(unittest.TestCase):
         # Stale line items surviving a re-ingest would attach a previous
         # extraction's prices to the new receipt id -- or to nothing.
         self.assertEqual(remaining["c"], 0)
+
+    def test_the_uploader_name_is_stored(self):
+        storage.save_receipt(self.conn, "IMG_1.jpg", receipt(), uploaded_by=" Priya ")
+        row = self.conn.execute("SELECT uploaded_by FROM receipts").fetchone()
+        self.assertEqual(row["uploaded_by"], "Priya")
+
+    def test_no_name_is_null_not_empty_string(self):
+        storage.save_receipt(self.conn, "IMG_1.jpg", receipt(), uploaded_by="   ")
+        row = self.conn.execute("SELECT uploaded_by FROM receipts").fetchone()
+        self.assertIsNone(row["uploaded_by"])
+
+    def test_deleting_a_receipt_removes_what_derives_from_it(self):
+        # This app will hold other people's receipt photographs. Being
+        # able to take your data back out has to work from the start.
+        receipt_id = storage.save_receipt(self.conn, "IMG_1.jpg", receipt(),
+                                          uploaded_by="Priya")
+        storage.save_line_item(self.conn, receipt_id, line())
+        self.conn.commit()
+
+        self.assertTrue(storage.delete_receipt(self.conn, receipt_id))
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) c FROM receipts").fetchone()["c"], 0)
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) c FROM line_items").fetchone()["c"], 0)
+
+    def test_deleting_a_receipt_leaves_shared_products_alone(self):
+        # Products are shared. Removing "onion" because one receipt went
+        # away would damage everybody else's price history.
+        storage.save_product(self.conn, "p1", "onion")
+        receipt_id = storage.save_receipt(self.conn, "IMG_1.jpg", receipt())
+        storage.save_line_item(self.conn, receipt_id, line(), product_id="p1")
+        self.conn.commit()
+
+        storage.delete_receipt(self.conn, receipt_id)
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) c FROM products").fetchone()["c"], 1)
+
+    def test_deleting_something_absent_reports_it(self):
+        self.assertFalse(storage.delete_receipt(self.conn, 9999))
 
     def test_different_photos_are_different_receipts(self):
         storage.save_receipt(self.conn, "IMG_1.jpg", receipt())

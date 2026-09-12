@@ -52,7 +52,25 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+# How to bring an EXISTING database up to each version. Keyed by the
+# version being migrated TO.
+#
+# A fresh database never runs these: `SCHEMA` below already describes the
+# current shape, so a new file is stamped at SCHEMA_VERSION directly.
+# These statements exist only for databases created by older code --
+# which, the moment there is real data in one, is the only kind that
+# matters. `CREATE TABLE IF NOT EXISTS` silently does nothing to a table
+# that already exists, so without this an added column would simply never
+# appear and every write to it would fail on a database that had been in
+# use.
+MIGRATIONS = {
+    2: [
+        # Multi-user, minimally: a display name on each receipt.
+        "ALTER TABLE receipts ADD COLUMN uploaded_by TEXT",
+    ],
+}
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -86,7 +104,17 @@ CREATE TABLE IF NOT EXISTS receipts (
     output_tokens       INTEGER,
     thinking_tokens     INTEGER,
     was_deskewed        INTEGER,
-    ingested_at         TEXT    NOT NULL
+    ingested_at         TEXT    NOT NULL,
+    -- Who uploaded this. A display name and nothing else: no account, no
+    -- password, no email. Deliberately the smallest possible step into
+    -- multi-user, because it needs no authentication to work and adds no
+    -- personal data beyond what a friend types into a box.
+    --
+    -- Worth being clear-eyed that this field is NOT where the sensitive
+    -- data is. The receipt image shows where someone shopped, when, and
+    -- what they bought, whatever name sits beside it. That is the reason
+    -- receipts are deletable, not the name.
+    uploaded_by         TEXT
 );
 
 -- A canonical product: the thing whose price is being tracked.
@@ -184,25 +212,60 @@ def connect(path: Path) -> sqlite3.Connection:
 
 
 def _migrate(connection: sqlite3.Connection) -> None:
-    """Bring the database up to the current schema.
+    """Bring the database up to the current schema version.
 
-    A version number rather than a migration framework. There is one
-    version so far; what matters is that the number exists now, because
-    adding it after the first schema change means guessing what shape an
-    existing database is in.
+    Three cases, and the middle one is the whole reason this exists:
+
+    A BRAND NEW FILE gets `SCHEMA` (already the current shape) and is
+    stamped at SCHEMA_VERSION. No migrations run -- they would try to add
+    columns that are already there.
+
+    AN OLDER DATABASE gets each migration between its version and the
+    current one, in order. This is the case that has real data in it, so
+    it is the case worth getting right.
+
+    A NEWER DATABASE -- written by code from the future -- is refused.
+    Operating on a schema this code does not understand risks writing
+    data that the newer code cannot read back.
     """
-    connection.executescript(SCHEMA)
-    row = connection.execute("SELECT version FROM schema_version").fetchone()
-    if row is None:
+    known = connection.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='schema_version'"
+    ).fetchone()
+
+    if known is None:
+        # Brand new file. SCHEMA is already the current shape, so it is
+        # created once and stamped; the migrations would only try to add
+        # columns that are already there.
+        connection.executescript(SCHEMA)
+        connection.execute("DELETE FROM schema_version")
         connection.execute("INSERT INTO schema_version (version) VALUES (?)",
                            (SCHEMA_VERSION,))
-    elif row["version"] != SCHEMA_VERSION:
-        # Nothing to do yet -- but fail loudly rather than silently
-        # operating on a schema this code was not written for.
+        connection.commit()
+        return
+
+    row = connection.execute("SELECT version FROM schema_version").fetchone()
+    current = int(row["version"]) if row else 0
+
+    if current > SCHEMA_VERSION:
         raise RuntimeError(
-            f"Database is schema version {row['version']}, this code expects "
-            f"{SCHEMA_VERSION}. No migration path is defined yet."
+            f"Database is schema version {current}, but this code only "
+            f"understands {SCHEMA_VERSION}. It was written by a newer version "
+            "of Skim -- update the code rather than downgrading the database."
         )
+
+    # Migrations run BEFORE the schema script, not after. SCHEMA ends with
+    # CREATE INDEX statements that name columns; if a future migration adds
+    # an indexed column, creating the index first would fail on a database
+    # that does not have that column yet. Columns first, then anything
+    # built on top of them.
+    for version in range(current + 1, SCHEMA_VERSION + 1):
+        for statement in MIGRATIONS.get(version, []):
+            connection.execute(statement)
+        connection.execute("UPDATE schema_version SET version = ?", (version,))
+
+    # Now safe: creates any tables and indexes added since, and does
+    # nothing to those that already exist.
+    connection.executescript(SCHEMA)
     connection.commit()
 
 
@@ -233,6 +296,7 @@ def save_receipt(
     receipt: Any,          # skim.extract.Receipt
     extraction: Any = None,  # skim.extract.ExtractionResult, for provenance
     was_deskewed: Optional[bool] = None,
+    uploaded_by: Optional[str] = None,
 ) -> int:
     """Insert or update one receipt, returning its id.
 
@@ -258,8 +322,9 @@ def save_receipt(
             purchase_time, subtotal_cents, tax_cents, total_cents,
             tax_rate_percent, amount_paid_cents, change_cents,
             item_count_printed, currency, extraction_model, prompt_tokens,
-            output_tokens, thinking_tokens, was_deskewed, ingested_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            output_tokens, thinking_tokens, was_deskewed, ingested_at,
+            uploaded_by
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         (
             source_file, receipt.merchant_name, receipt.store_number,
@@ -277,6 +342,7 @@ def save_receipt(
             getattr(extraction, "thinking_tokens", None),
             None if was_deskewed is None else int(was_deskewed),
             _now(),
+            (uploaded_by or "").strip() or None,
         ),
     )
     connection.commit()
@@ -389,3 +455,25 @@ def save_validation(
             (receipt_id, check.name, check.status.value, check.detail,
              check.line_number),
         )
+
+
+def delete_receipt(connection: sqlite3.Connection, receipt_id: int) -> bool:
+    """Remove a receipt and everything derived from it.
+
+    Built in from the start rather than bolted on later, because this
+    app will hold other people's receipt photographs. The name someone
+    types in a box is not the sensitive part -- the photograph is, since
+    it shows where they shopped, when, and what they bought. Anyone
+    whose data is here should be able to take it back out, and that is
+    much harder to add convincingly after the fact.
+
+    The cascade removes line items and validation results. Products are
+    deliberately left alone: they are shared across receipts, so
+    deleting "onion" because one receipt went away would damage
+    everybody else's price history.
+    """
+    cursor = connection.execute(
+        "DELETE FROM receipts WHERE receipt_id = ?", (receipt_id,)
+    )
+    connection.commit()
+    return cursor.rowcount > 0
