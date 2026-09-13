@@ -3,10 +3,10 @@
 {% if pending %}
 <div class="pending pop">
   <span class="spinner"></span>
-  <span><b>Still working out what {{ pending }} thing{{ '' if pending == 1 else 's' }}
-  actually cost</b> — hang on, this page updates itself.</span>
+  <span><b id="pendingText">Still working out what {{ pending }} thing{{ '' if pending == 1 else 's' }}
+  actually cost</b> — no need to wait around, it'll appear on its own.</span>
 </div>
-<meta http-equiv="refresh" content="6">
+
 {% endif %}
 
 <section class="panel cy pop">
@@ -96,4 +96,31 @@
     as well — properly gone, not just hidden.</span>
   </div>
 </section>
+{% if pending %}
+<script>
+  // Ask quietly how it's going, and reload ONCE when the work is done.
+  // The previous version was a meta-refresh every six seconds, which
+  // reloaded the whole page, lost your scroll position and flashed --
+  // repeatedly, for a job that finishes once.
+  (function () {
+    const label = document.getElementById('pendingText');
+    let tries = 0;
+    const poll = () => {
+      if (++tries > 60) return;                 // give up after ~3 minutes
+      fetch('/receipt/{{ receipt.receipt_id }}/status')
+        .then(r => r.json())
+        .then(d => {
+          if (d.pending === 0) { location.reload(); return; }
+          if (label) {
+            label.textContent = 'Still working out what ' + d.pending +
+              (d.pending === 1 ? ' thing' : ' things') + ' actually cost';
+          }
+          setTimeout(poll, 3000);
+        })
+        .catch(() => setTimeout(poll, 5000));
+    };
+    setTimeout(poll, 2500);
+  })();
+</script>
+{% endif %}
 {% endblock %}

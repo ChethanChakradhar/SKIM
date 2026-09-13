@@ -406,6 +406,32 @@ def receipt_detail(request: Request, receipt_id: int):
         connection.close()
 
 
+@app.get("/receipt/{receipt_id}/status")
+def receipt_status(request: Request, receipt_id: int):
+    """How many lines are still waiting to be priced.
+
+    Exists so the page can ask quietly instead of reloading itself. A
+    meta-refresh reloaded everything every six seconds, which threw away
+    the reader's scroll position and flashed the screen -- for a job that
+    usually finishes once.
+    """
+    connection = db()
+    try:
+        shopper = current_shopper(request, connection)
+        if not shopper:
+            return {"pending": 0}
+        row = connection.execute(
+            """SELECT COUNT(*) c FROM line_items
+               WHERE receipt_id = ? AND is_voided = 0 AND product_id IS NULL
+                 AND receipt_id IN (SELECT receipt_id FROM receipts
+                                    WHERE shopper_id = ?)""",
+            (receipt_id, shopper["shopper_id"]),
+        ).fetchone()
+        return {"pending": row["c"]}
+    finally:
+        connection.close()
+
+
 @app.post("/receipt/{receipt_id}/delete")
 def delete(request: Request, receipt_id: int):
     connection = db()
