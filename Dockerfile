@@ -49,11 +49,18 @@ RUN useradd --create-home --shell /bin/bash skim \
  && mkdir -p /data && chown -R skim:skim /data /app
 USER skim
 
-# Where the database and uploaded photos live. Railway mounts a
-# persistent volume here; without it, every deploy would wipe the data,
-# because a container's own filesystem is thrown away when it stops.
+# Where the database and uploaded photos live.
+#
+# A container's own filesystem is thrown away when it stops, so anything
+# that must survive a deploy has to sit on storage mounted from outside.
+# This only names the path; the storage itself is attached by the host.
+#
+# Note there is deliberately no `VOLUME ["/data"]` here. Plain Docker
+# uses that to declare a persistent path, but Railway manages storage
+# itself and REJECTS the instruction at build time -- it would rather
+# fail than let you believe you have persistent storage when the volume
+# was never attached. Mount a Railway Volume at /data instead.
 ENV SKIM_DATA_DIR=/data
-VOLUME ["/data"]
 
 # Unbuffered output, so logs appear in Railway immediately rather than
 # being held in a buffer until the process exits.
