@@ -62,7 +62,7 @@ sys.path.insert(0, str(ROOT))
 from dotenv import load_dotenv
 load_dotenv(ROOT / ".env")
 
-from skim import storage
+from skim import analysis, storage
 from skim.capture import CaptureError, capture
 from skim.extract import ExtractionError, extract
 from skim.match import ProductCatalog, resolve
@@ -330,6 +330,38 @@ def dashboard(request: Request):
             "request": request, "shopper": shopper, "receipts": receipts,
             "prices": prices, "spend_cents": spend,
             "is_admin": _is_admin(shopper),
+        })
+    finally:
+        connection.close()
+
+
+@app.get("/insights", response_class=HTMLResponse)
+def insights(request: Request):
+    """What the receipts actually add up to.
+
+    Everything here degrades honestly. With one shop it shows where the
+    money went and says plainly what is still missing -- rather than an
+    empty chart, or a trend line drawn through a single point.
+    """
+    connection = db()
+    try:
+        shopper = current_shopper(request, connection)
+        if not shopper:
+            return RedirectResponse("/", status_code=303)
+
+        shopper_id = shopper["shopper_id"]
+        histories = analysis.price_histories(connection, shopper_id)
+
+        return templates.TemplateResponse("insights.html", {
+            "request": request, "shopper": shopper,
+            "is_admin": _is_admin(shopper),
+            "summary": analysis.summary(connection, shopper_id),
+            "changes": analysis.price_changes(histories),
+            "stores": analysis.store_comparison(histories),
+            "categories": analysis.spend_by_category(connection, shopper_id),
+            "shops": analysis.spend_over_time(connection, shopper_id),
+            "histories": histories[:20],
+            "unlocks": analysis.what_unlocks_next(connection, shopper_id),
         })
     finally:
         connection.close()

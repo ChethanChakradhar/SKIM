@@ -1,0 +1,160 @@
+{% extends "base.html" %}
+{% block content %}
+
+<section class="panel pop">
+  <div class="bar">Where you're at <span class="right">{{ summary.shops }} store visit{{ '' if summary.shops == 1 else 's' }}</span></div>
+  <div class="body">
+    <div class="stats">
+      <div class="stat"><b data-count="{{ summary.total_spent }}" data-prefix="$" data-dp="2">$0</b>
+        <span>spent in total</span></div>
+      <div class="stat vi"><b data-count="{{ summary.average_shop }}" data-prefix="$" data-dp="2">$0</b>
+        <span>average visit</span></div>
+      <div class="stat mg"><b data-count="{{ summary.products }}">0</b>
+        <span>different things</span></div>
+      <div class="stat"><b data-count="{{ summary.repeat_products }}">0</b>
+        <span>bought more than once</span></div>
+    </div>
+    {% if summary.first_date %}
+    <p class="note">From {{ summary.first_date }}{% if summary.last_date != summary.first_date %}
+      to {{ summary.last_date }}{% endif %} · {{ summary.days_covered }}
+      day{{ '' if summary.days_covered == 1 else 's' }} of shopping.</p>
+    {% endif %}
+  </div>
+</section>
+
+{% if changes %}
+<section class="panel mg pop">
+  <div class="bar">What's gone up, what's gone down <span class="right">{{ changes|length }}</span></div>
+  <div class="body">
+    <div class="tblwrap">
+      <table>
+        <thead><tr><th>Item</th><th>First paid</th><th>Now</th><th>Bought</th>
+          <th style="text-align:right">Change</th></tr></thead>
+        <tbody>
+          {% for h in changes %}
+          <tr>
+            <td>{{ h.name }}</td>
+            <td>${{ '%.2f'|format(h.points[0].price) }}<small>/{{ h.unit }}</small></td>
+            <td>${{ '%.2f'|format(h.latest.price) }}<small>/{{ h.unit }}</small></td>
+            <td style="color:var(--dim)">{{ h.times_bought }}×</td>
+            <td class="num" style="color:{{ 'var(--pink)' if h.change > 0 else 'var(--lime)' }}">
+              {{ '+' if h.change > 0 else '' }}{{ '%.1f'|format(h.change) }}%</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+{% endif %}
+
+{% if stores %}
+<section class="panel vi pop">
+  <div class="bar">Where the same thing costs less <span class="right">{{ stores|length }}</span></div>
+  <div class="body">
+    <div class="tblwrap">
+      <table>
+        <thead><tr><th>Item</th><th>Cheaper at</th><th>Dearer at</th>
+          <th style="text-align:right">Difference</th></tr></thead>
+        <tbody>
+          {% for s in stores %}
+          <tr>
+            <td>{{ s.name }}</td>
+            <td><b style="color:var(--lime)">{{ s.cheapest_store }}</b>
+              <small style="color:var(--dim)"> ${{ '%.2f'|format(s.cheapest_price) }}/{{ s.unit }}</small></td>
+            <td>{{ s.dearest_store }}
+              <small style="color:var(--dim)"> ${{ '%.2f'|format(s.dearest_price) }}/{{ s.unit }}</small></td>
+            <td class="num">{{ '%.0f'|format(s.gap_percent) }}% more</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <p class="note">Per item, not per basket — comparing whole baskets mostly measures what you
+    happened to buy, not what things cost.</p>
+  </div>
+</section>
+{% endif %}
+
+{% if categories %}
+<section class="panel pop">
+  <div class="bar">Where the money goes <span class="right">by category</span></div>
+  <div class="body">
+    <div class="bars">
+      {% for c in categories %}
+      <div class="barrow">
+        <span class="barlabel">{{ c.category.replace('_', ' ') }}</span>
+        <span class="bartrack"><i style="width: {{ '%.1f'|format(c.share) }}%"></i></span>
+        <span class="barval">${{ '%.2f'|format(c.spent) }}</span>
+        <span class="barpct">{{ '%.0f'|format(c.share) }}%</span>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+</section>
+{% endif %}
+
+{% if shops|length > 1 %}
+<section class="panel vi pop">
+  <div class="bar">Every store visit <span class="right">{{ shops|length }}</span></div>
+  <div class="body">
+    <div class="tblwrap">
+      <table>
+        <thead><tr><th>Date</th><th>Store</th><th>Items</th>
+          <th style="text-align:right">Spent</th></tr></thead>
+        <tbody>
+          {% for s in shops %}
+          <tr><td>{{ s.date or '—' }}</td><td>{{ s.store or '—' }}</td>
+            <td style="color:var(--dim)">{{ s.items }}</td>
+            <td class="num">${{ '%.2f'|format(s.spent) }}</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+{% endif %}
+
+{% if unlocks %}
+<section class="panel mg pop">
+  <div class="bar">Not enough data yet for <span class="right">{{ unlocks|length }}</span></div>
+  <div class="body">
+    <div class="list">
+      {% for u in unlocks %}
+      <div class="item" style="align-items:flex-start;flex-direction:column;gap:5px">
+        <b>{{ u.what }}</b>
+        <span style="color:var(--lime);font-size:12.5px">→ {{ u.needs }}</span>
+        <span class="meta">{{ u.why }}</span>
+      </div>
+      {% endfor %}
+    </div>
+    <p class="note">Nothing here is broken — these just need more store visits before the
+    answer means anything. <b>Skim won't invent a number it can't stand behind.</b></p>
+  </div>
+</section>
+{% endif %}
+
+{% if histories %}
+<section class="panel pop">
+  <div class="bar">Everything you've bought <span class="right">{{ histories|length }}</span></div>
+  <div class="body">
+    <div class="tblwrap">
+      <table>
+        <thead><tr><th>Item</th><th>Category</th><th>Times</th>
+          <th style="text-align:right">Latest price</th></tr></thead>
+        <tbody>
+          {% for h in histories %}
+          <tr>
+            <td>{{ h.name }}</td>
+            <td>{% if h.category %}<span class="cat {{ h.category }}">{{ h.category.replace('_',' ') }}</span>{% endif %}</td>
+            <td style="color:var(--dim)">{{ h.times_bought }}×</td>
+            <td class="num">${{ '%.2f'|format(h.latest.price) }}<small>/{{ h.unit }}</small></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+{% endif %}
+{% endblock %}
