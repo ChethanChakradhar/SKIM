@@ -146,6 +146,32 @@ def db() -> sqlite3.Connection:
 
 # --- the slow half of an upload --------------------------------------
 
+# Receipts currently being enriched, so a page refresh doesn't start a
+# second run over the same rows. In-memory on purpose: if the process
+# dies the set dies with it, which is exactly right -- the work is no
+# longer running either, and it should be picked up again.
+_enriching: set = set()
+
+
+def enrich_if_stalled(receipt_id: int, store: Optional[str],
+                      background: BackgroundTasks) -> None:
+    """Restart product matching if it never finished.
+
+    Background tasks run after the response and do NOT survive the
+    container being replaced -- which happens on every deploy, crash, or
+    when the platform moves the app. A receipt uploaded moments before a
+    deploy had its matching killed halfway and nothing ever retried it,
+    leaving 18 lines permanently unnamed.
+
+    So the receipt page heals itself: if it still sees unmatched lines,
+    it schedules the work again. Parsing is cached, so a resumed run only
+    pays for what was genuinely missing -- and if the job really is still
+    running, the guard above stops a second one starting.
+    """
+    if receipt_id in _enriching:
+        return
+    background.add_task(enrich_receipt, receipt_id, store)
+
 def enrich_receipt(receipt_id: int, store: Optional[str]) -> None:
     """Parse and match every product on a receipt, then fill in prices.
 
@@ -153,6 +179,7 @@ def enrich_receipt(receipt_id: int, store: Optional[str]) -> None:
     catalog has never seen, so the first few receipts are slow and later
     ones are nearly free -- a store prints the same strings every time.
     """
+    _enriching.add(receipt_id)
     connection = db()
     try:
         cache = ProductCache(DATA_DIR / "processed" / "product_cache.json")
@@ -202,6 +229,7 @@ def enrich_receipt(receipt_id: int, store: Optional[str]) -> None:
         connection.commit()
     finally:
         connection.close()
+        _enriching.discard(receipt_id)
 
 
 def _catalog_fields(catalog: ProductCatalog, product_id: str):
@@ -365,7 +393,8 @@ def _error_redirect(message: str) -> RedirectResponse:
 
 
 @app.get("/receipt/{receipt_id}", response_class=HTMLResponse)
-def receipt_detail(request: Request, receipt_id: int):
+def receipt_detail(request: Request, receipt_id: int,
+                   background: BackgroundTasks = None):
     connection = db()
     try:
         shopper = current_shopper(request, connection)
@@ -396,6 +425,11 @@ def receipt_detail(request: Request, receipt_id: int):
         ran = sum(1 for c in checks if c["status"] in ("pass", "fail"))
         pending = sum(1 for i in items
                       if not i["is_voided"] and i["product_id"] is None)
+
+        # Self-healing: if lines are still unmatched, the job either is
+        # running or was killed. Scheduling it again is safe and cheap.
+        if pending and background is not None:
+            enrich_if_stalled(receipt_id, receipt["merchant_name"], background)
 
         return templates.TemplateResponse("receipt.html", {
             "request": request, "shopper": shopper, "receipt": receipt,
