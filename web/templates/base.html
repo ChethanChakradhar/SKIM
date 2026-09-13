@@ -19,7 +19,7 @@
     <div class="who">
       <span class="av">{{ shopper.display_name[0]|upper }}</span>
       <span><b>{{ shopper.display_name }}</b><br>
-        <a href="/logout">sign out</a></span>
+        {% if is_admin %}<a href="/admin">health</a> · {% endif %}<a href="/logout">sign out</a></span>
     </div>
     {% endif %}
   </div>

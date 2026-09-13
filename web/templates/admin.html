@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+{% block content %}
+
+<section class="panel pop">
+  <div class="bar">How the machine is doing <span class="right">admin only</span></div>
+  <div class="body">
+    <div class="stats">
+      <div class="stat"><b data-count="{{ t.check_pass_rate or 0 }}" data-dp="1" data-suffix="%">0</b>
+        <span>maths checks passed</span></div>
+      <div class="stat vi"><b data-count="{{ t.parse_rate or 0 }}" data-dp="1" data-suffix="%">0</b>
+        <span>products identified</span></div>
+      <div class="stat mg"><b data-count="{{ t.priced_rate or 0 }}" data-dp="1" data-suffix="%">0</b>
+        <span>lines priced</span></div>
+      <div class="stat"><b data-count="{{ t.cost }}" data-prefix="$" data-dp="2">$0</b>
+        <span>spent on the API</span></div>
+    </div>
+    <p class="note" style="margin-top:18px">
+      {{ t.receipts }} receipts · {{ t.shoppers }} people · {{ t.line_items }} lines ·
+      {{ t.products }} products known ·
+      {{ t.checks_failed }} failed checks · {{ t.checks_skipped }} not printed
+      {% if t.thinking_share %} · thinking tokens are {{ t.thinking_share|int }}% of spend{% endif %}
+    </p>
+    <p class="note"><b>This page shows how well the pipeline reads receipts — not what
+    anybody bought.</b> No item names, no amounts, no shopping. Knowing whether the model
+    works doesn't require knowing what your friends eat.</p>
+  </div>
+</section>
+
+{% if unparsed %}
+<section class="panel mg pop">
+  <div class="bar">Strings it couldn't decode <span class="right">{{ unparsed|length }}</span></div>
+  <div class="body">
+    <div class="tblwrap">
+      <table>
+        <thead><tr><th>Store</th><th>Printed on the receipt</th>
+          <th style="text-align:right">Seen</th></tr></thead>
+        <tbody>
+          {% for u in unparsed %}
+          <tr><td>{{ u.store }}</td><td>{{ u.raw_description }}</td>
+            <td class="num">{{ u.seen }}</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <p class="note">These are product names printed by a till, not personal data — and the
+    parser can't be improved without seeing what defeated it.</p>
+  </div>
+</section>
+{% endif %}
+
+{% if failures %}
+<section class="panel mg pop">
+  <div class="bar">Receipts whose maths didn't add up <span class="right">{{ failures|length }}</span></div>
+  <div class="body">
+    <div class="tblwrap">
+      <table>
+        <thead><tr><th>Receipt</th><th>Check</th><th>What went wrong</th></tr></thead>
+        <tbody>
+          {% for f in failures %}
+          <tr><td>#{{ f.receipt_id }}</td><td>{{ f.check_name.replace('_',' ') }}</td>
+            <td style="color:var(--dim)">{{ f.detail }}</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+{% endif %}
+
+<section class="panel vi pop">
+  <div class="bar">Every receipt, as a reading job <span class="right">{{ receipts|length }}</span></div>
+  <div class="body">
+    <div class="tblwrap">
+      <table>
+        <thead><tr><th>#</th><th>Store</th><th>Date</th><th>Uploaded by</th>
+          <th>Lines</th><th>Named</th><th>Checks</th><th>Cropped</th></tr></thead>
+        <tbody>
+          {% for r in receipts %}
+          <tr>
+            <td>#{{ r.receipt_id }}</td>
+            <td>{{ r.merchant_name or '—' }}</td>
+            <td style="color:var(--dim)">{{ r.purchase_date or '—' }}</td>
+            <td>{{ r.who or '—' }}</td>
+            <td class="num">{{ r.lines or 0 }}</td>
+            <td class="num">{{ r.named or 0 }}</td>
+            <td class="num">{% if r.ran %}{{ r.passed or 0 }}/{{ r.ran }}{% else %}—{% endif %}</td>
+            <td>{% if r.was_deskewed == 1 %}<span class="cat produce">yes</span>
+                {% elif r.was_deskewed == 0 %}<span class="cat">no</span>
+                {% else %}—{% endif %}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <p class="note">Counts and outcomes only. Open a receipt and you'd see someone's
+    shopping — which this page deliberately has no link to.</p>
+  </div>
+</section>
+{% endblock %}

@@ -56,6 +56,12 @@ ROOT = Path(__file__).resolve().parent.parent
 import sys
 sys.path.insert(0, str(ROOT))
 
+# Load .env before any configuration is read below. Locally this supplies
+# the API key and the admin name; on Railway those arrive as real
+# environment variables and this simply finds nothing to do.
+from dotenv import load_dotenv
+load_dotenv(ROOT / ".env")
+
 from skim import storage
 from skim.capture import CaptureError, capture
 from skim.extract import ExtractionError, extract
@@ -78,10 +84,26 @@ DB_PATH = DATA_DIR / "skim.db"
 # development working, at the cost of logging everyone out on restart.
 SECRET_KEY = os.getenv("SKIM_SECRET_KEY") or secrets.token_hex(32)
 
+# Whether session cookies are marked HTTPS-only. Set this in production
+# and leave it unset locally, where there is no TLS.
+#
+# It is an explicit switch rather than being inferred from "is a secret
+# key configured", which is what it used to be -- that guess meant a test
+# that supplied a signing key silently got Secure cookies over plain
+# HTTP, and every session in the test suite failed with no clue why.
+# Security flags should be stated, not deduced from something adjacent.
+SECURE_COOKIES = os.getenv("SKIM_SECURE_COOKIES", "").lower() in ("1", "true", "yes")
+
 COOKIE_NAME = "skim_session"
 COOKIE_MAX_AGE = 60 * 60 * 24 * 30  # a month; this is a receipt app, not a bank
 
 MAX_UPLOAD_BYTES = 25_000_000
+
+# Who can see the health dashboard. A name, set in the environment --
+# not a role column in the database, because there is exactly one admin
+# and inventing a permissions system for one person is how simple things
+# stop being simple.
+ADMIN_NAME = (os.getenv("SKIM_ADMIN") or "").strip().lower()
 
 app = FastAPI(title="Skim")
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
@@ -229,7 +251,7 @@ def do_signin(request: Request, name: str = Form(...), pin: str = Form(...)):
             COOKIE_NAME, _sign(shopper_id), max_age=COOKIE_MAX_AGE,
             httponly=True,   # JavaScript cannot read it, so an XSS bug cannot steal it
             samesite="lax",  # not sent on cross-site POSTs, which blocks basic CSRF
-            secure=bool(os.getenv("SKIM_SECRET_KEY")),  # HTTPS-only in production
+            secure=SECURE_COOKIES,  # HTTPS-only once deployed; see above
         )
         return response
     finally:
@@ -279,6 +301,7 @@ def dashboard(request: Request):
         return templates.TemplateResponse("dashboard.html", {
             "request": request, "shopper": shopper, "receipts": receipts,
             "prices": prices, "spend_cents": spend,
+            "is_admin": _is_admin(shopper),
         })
     finally:
         connection.close()
@@ -377,7 +400,7 @@ def receipt_detail(request: Request, receipt_id: int):
         return templates.TemplateResponse("receipt.html", {
             "request": request, "shopper": shopper, "receipt": receipt,
             "items": items, "checks": checks, "passed": passed, "ran": ran,
-            "pending": pending,
+            "pending": pending, "is_admin": _is_admin(shopper),
         })
     finally:
         connection.close()
@@ -399,6 +422,100 @@ def delete(request: Request, receipt_id: int):
             # image would not be deletion in any sense that matters.
             (UPLOAD_DIR / owned["source_file"]).unlink(missing_ok=True)
         return RedirectResponse("/me", status_code=303)
+    finally:
+        connection.close()
+
+
+def _is_admin(shopper) -> bool:
+    return bool(shopper) and bool(ADMIN_NAME) and shopper["name_key"] == ADMIN_NAME
+
+
+@app.get("/admin", response_class=HTMLResponse)
+def admin(request: Request):
+    """How well the machine is working -- NOT what anyone bought.
+
+    Deliberately aggregate. Knowing whether the pipeline is accurate
+    needs pass rates, parse rates and the strings it failed to decode;
+    it does not need anyone's shopping. Where someone shops and what
+    they eat adds nothing to that judgement, so it is not shown -- least
+    privilege, applied to the one page that could most easily ignore it.
+
+    The failing product strings ARE shown, because fixing the parser is
+    impossible without them, and a receipt string like "BLUE BANDED" is
+    a product name rather than personal data.
+    """
+    connection = db()
+    try:
+        shopper = current_shopper(request, connection)
+        if not _is_admin(shopper):
+            return RedirectResponse("/me", status_code=303)
+
+        q = lambda sql, *a: connection.execute(sql, a).fetchone()
+
+        totals = {
+            "receipts": q("SELECT COUNT(*) c FROM receipts")["c"],
+            "shoppers": q("SELECT COUNT(*) c FROM shoppers")["c"],
+            "line_items": q("SELECT COUNT(*) c FROM line_items")["c"],
+            "products": q("SELECT COUNT(*) c FROM products")["c"],
+        }
+
+        checks = q("""SELECT
+            SUM(status='pass') p, SUM(status='fail') f, SUM(status='uncheckable') u
+            FROM validation_results""")
+        ran = (checks["p"] or 0) + (checks["f"] or 0)
+        totals["check_pass_rate"] = round(100 * (checks["p"] or 0) / ran, 1) if ran else None
+        totals["checks_failed"] = checks["f"] or 0
+        totals["checks_skipped"] = checks["u"] or 0
+
+        priced = q("""SELECT SUM(price_per_display IS NOT NULL) p, COUNT(*) c
+                      FROM line_items WHERE is_voided = 0""")
+        totals["priced_rate"] = (round(100 * priced["p"] / priced["c"], 1)
+                                 if priced["c"] else None)
+
+        named = q("SELECT SUM(needs_review = 0) ok, COUNT(*) c FROM product_aliases")
+        totals["parse_rate"] = (round(100 * named["ok"] / named["c"], 1)
+                                if named["c"] else None)
+
+        tokens = q("""SELECT COALESCE(SUM(prompt_tokens),0) i,
+                      COALESCE(SUM(output_tokens),0) o,
+                      COALESCE(SUM(thinking_tokens),0) t FROM receipts""")
+        # gemini-3.6-flash promotional pricing; thinking bills as output
+        totals["cost"] = (tokens["i"] * 0.75 + (tokens["o"] + tokens["t"]) * 3.75) / 1e6
+        totals["thinking_share"] = (round(100 * tokens["t"] / (tokens["o"] + tokens["t"]), 0)
+                                    if (tokens["o"] + tokens["t"]) else None)
+
+        # Per receipt: how well it was READ. No item detail, no amounts.
+        receipts = connection.execute("""
+            SELECT r.receipt_id, r.merchant_name, r.purchase_date, r.was_deskewed,
+                   r.extraction_model, s.display_name AS who,
+                   COUNT(li.line_item_id) lines,
+                   SUM(li.product_id IS NOT NULL) named,
+                   (SELECT SUM(status='pass') FROM validation_results v
+                     WHERE v.receipt_id = r.receipt_id) passed,
+                   (SELECT SUM(status IN ('pass','fail')) FROM validation_results v
+                     WHERE v.receipt_id = r.receipt_id) ran
+            FROM receipts r
+            LEFT JOIN shoppers s ON s.shopper_id = r.shopper_id
+            LEFT JOIN line_items li ON li.receipt_id = r.receipt_id AND li.is_voided = 0
+            GROUP BY r.receipt_id ORDER BY r.receipt_id DESC
+        """).fetchall()
+
+        # The strings the parser gave up on -- the actual worklist.
+        unparsed = connection.execute("""
+            SELECT store, raw_description, COUNT(*) seen
+            FROM product_aliases WHERE needs_review = 1
+            GROUP BY store, raw_description ORDER BY seen DESC LIMIT 40
+        """).fetchall()
+
+        failures = connection.execute("""
+            SELECT v.receipt_id, v.check_name, v.detail
+            FROM validation_results v WHERE v.status = 'fail' LIMIT 30
+        """).fetchall()
+
+        return templates.TemplateResponse("admin.html", {
+            "request": request, "shopper": shopper, "t": totals, "is_admin": True,
+            "receipts": receipts, "unparsed": unparsed, "failures": failures,
+        })
     finally:
         connection.close()
 
