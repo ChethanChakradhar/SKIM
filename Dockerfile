@@ -42,12 +42,13 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY skim/ ./skim/
 COPY web/ ./web/
 
-# Run as a non-root user. If something ever breaks out of the app, it
-# lands as a user with no privileges rather than as root inside the
-# container. Costs two lines.
+# Create the unprivileged user the app will actually run as. The
+# container still STARTS as root, because the entrypoint has to fix the
+# ownership of a volume that gets mounted after the build finishes --
+# see docker-entrypoint.sh. It drops to this user before serving
+# anything, so no request is ever handled with root privileges.
 RUN useradd --create-home --shell /bin/bash skim \
  && mkdir -p /data && chown -R skim:skim /data /app
-USER skim
 
 # Where the database and uploaded photos live.
 #
@@ -70,4 +71,6 @@ ENV PYTHONUNBUFFERED=1
 # 0.0.0.0 rather than 127.0.0.1 matters: inside a container, localhost
 # means "this container only", and the platform would never reach it.
 EXPOSE 8000
-CMD ["sh", "-c", "uvicorn web.app:app --host 0.0.0.0 --port ${PORT:-8000}"]
+COPY docker-entrypoint.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
