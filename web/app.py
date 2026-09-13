@@ -612,6 +612,30 @@ def admin(request: Request):
         connection.close()
 
 
+@app.post("/admin/reprice")
+def reprice(request: Request, background: BackgroundTasks):
+    """Re-run parsing and pricing over every receipt.
+
+    Needed whenever the parser changes in a way that makes old results
+    wrong. The cache is what keeps this cheap -- only entries from an
+    older parser version are actually re-parsed, everything else is a
+    free lookup -- but a fix still has to be applied to receipts that
+    already look finished, and nothing else would ever revisit them.
+    """
+    connection = db()
+    try:
+        shopper = current_shopper(request, connection)
+        if not _is_admin(shopper):
+            return RedirectResponse("/me", status_code=303)
+        for row in connection.execute(
+                "SELECT receipt_id, merchant_name FROM receipts").fetchall():
+            background.add_task(enrich_receipt, row["receipt_id"],
+                                row["merchant_name"])
+        return RedirectResponse("/admin?repricing=1", status_code=303)
+    finally:
+        connection.close()
+
+
 @app.get("/health")
 def health():
     """Railway restarts the container if this stops answering."""

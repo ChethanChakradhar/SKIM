@@ -20,6 +20,18 @@
       {{ t.checks_failed }} failed checks · {{ t.checks_skipped }} not printed
       {% if t.thinking_share %} · thinking tokens are {{ t.thinking_share|int }}% of spend{% endif %}
     </p>
+    {% if request.query_params.get('repricing') %}
+    <div class="pending" style="margin-top:18px">
+      <span class="spinner"></span>
+      <span><b>Re-reading every receipt</b> with the current parser — refresh in a minute.</span>
+    </div>
+    {% endif %}
+    <form method="post" action="/admin/reprice" style="margin-top:18px">
+      <button class="btn small ghost" type="submit">Re-price everything</button>
+    </form>
+    <p class="note" style="margin-top:10px">Use after a parser change. Products already
+    decoded by the current parser are free to re-check; only stale ones cost a call.</p>
+
     <p class="note"><b>This page shows how well the pipeline reads receipts — not what
     anybody bought.</b> No item names, no amounts, no shopping. Knowing whether the model
     works doesn't require knowing what your friends eat.</p>

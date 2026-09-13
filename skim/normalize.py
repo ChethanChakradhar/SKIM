@@ -54,6 +54,19 @@ from skim.extract import (
     _load_client,
 )
 
+# Bumped whenever the prompt or the output shape changes in a way that
+# makes older parses wrong rather than merely different. Cached entries
+# parsed under an older version are re-parsed rather than trusted.
+#
+# Without this, a prompt fix only ever applies to products nobody has
+# bought yet: the cache is what makes this cheap, and it is also what
+# would quietly preserve every mistake made before the fix.
+#
+#   1  original
+#   2  added size_is_capacity -- a 12.25oz tumbler was being priced per
+#      pound of glass
+PARSER_VERSION = 2
+
 # Units Step 6 knows how to convert. The model is free to return
 # anything, but a unit outside this list is discarded rather than
 # trusted: Step 6 computes price-per-ounce from these, and a
@@ -198,9 +211,17 @@ class ParsedProduct:
     pack_count: Optional[int]
     category: Optional[str]
     canonical_text: Optional[str]
-    needs_review: bool  # True when the model could not identify the product
+    # True when the printed size DESCRIBES the object rather than saying
+    # how much of it you get. A 12.25 oz tumbler holds 12.25 oz; you do
+    # not consume 12.25 ounces of glass. A 14 oz tub of paneer is 14 oz
+    # of paneer. Same unit, completely different meaning -- and without
+    # this flag the glass gets priced per pound, which is nonsense the
+    # rest of the pipeline cannot detect.
+    size_is_capacity: bool = False
+    needs_review: bool = False  # True when the product could not be identified
     parse_note: Optional[str] = None  # why, when it couldn't
     attempts: int = 1  # 2 means the retry-with-context path was used
+    parser_version: int = 1  # which prompt produced this
 
     @property
     def is_identified(self) -> bool:
@@ -219,6 +240,7 @@ PRODUCT_SCHEMA: Dict[str, Any] = {
         "pack_count": {"type": "integer", "nullable": True},
         "category": {"type": "string", "nullable": True},
         "canonical_text": {"type": "string", "nullable": True},
+        "size_is_capacity": {"type": "boolean"},
         "needs_review": {"type": "boolean"},
         "parse_note": {"type": "string", "nullable": True},
     },
@@ -251,6 +273,20 @@ FIELDS
   units -- report what is printed. "310 GM" is 310 g, not 10.9 oz.
 - `pack_count`: how many packages, if the description says so
   ("2-PACK", "4-CUP" is a size not a pack). Null otherwise.
+- `size_is_capacity`: true when the size DESCRIBES THE OBJECT rather
+  than saying how much of it you get.
+
+    "BOURBON ROCKS 12.25Z"  -> true. A tumbler that HOLDS 12.25 oz. You
+                               buy one glass; you do not consume 12.25
+                               ounces of glass.
+    "STERLT-10G"            -> true. A storage tote of 10 gallon capacity.
+    "SWAD PANEER 14oz"      -> false. You get and eat 14 oz of paneer.
+    "ONION 10LB YELLOW"     -> false. You get 10 lb of onions.
+
+  The test is simple: if the thing were twice the size, would you have
+  twice as much STUFF, or one bigger OBJECT? Cookware, glassware,
+  containers, storage boxes, buckets, mugs, flasks and towels are
+  objects. Food, drink, detergent and anything measured out is stuff.
 - `category`: what kind of thing this is. Prefer one of the categories
   already in use, listed below, so that the same kind of product always
   lands in the same group. If none of them genuinely fits, name a new
@@ -341,6 +377,7 @@ def _coerce(
         size_value=size,
         size_unit=unit,
         pack_count=payload.get("pack_count"),
+        size_is_capacity=bool(payload.get("size_is_capacity")),
         category=category,
         canonical_text=(payload.get("canonical_text") or "").strip() or None,
         # Trust the model's own flag, but override it when the parse is
@@ -349,6 +386,7 @@ def _coerce(
         needs_review=bool(payload.get("needs_review")) or product is None,
         parse_note=(payload.get("parse_note") or "").strip() or None,
         attempts=attempts,
+        parser_version=PARSER_VERSION,
     )
 
 
@@ -477,8 +515,20 @@ class ProductCache:
         return f"{(store or 'unknown').strip().upper()}||{raw_description.strip()}"
 
     def get(self, store: Optional[str], raw_description: str) -> Optional[ParsedProduct]:
+        """The remembered parse, or None if it predates the current parser.
+
+        An entry from an older parser version is not returned, so the
+        caller re-parses it. That is the only way a prompt fix reaches
+        products already in the cache -- otherwise the cache, which
+        exists to save money, would also permanently preserve every
+        mistake made before the fix.
+        """
         entry = self.entries.get(self.key(store, raw_description))
-        return ParsedProduct(**entry) if entry else None
+        if not entry:
+            return None
+        if entry.get("parser_version", 1) < PARSER_VERSION:
+            return None
+        return ParsedProduct(**entry)
 
     def put(self, store: Optional[str], parsed: ParsedProduct) -> None:
         self.entries[self.key(store, parsed.raw_description)] = asdict(parsed)

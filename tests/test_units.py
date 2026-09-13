@@ -24,7 +24,8 @@ from skim.units import (
 )
 
 
-def product(size_value=None, size_unit=None, pack_count=None, product_name="thing"):
+def product(size_value=None, size_unit=None, pack_count=None, product_name="thing",
+            size_is_capacity=False):
     return ParsedProduct(
         raw_description="RAW",
         brand=None,
@@ -35,6 +36,7 @@ def product(size_value=None, size_unit=None, pack_count=None, product_name="thin
         pack_count=pack_count,
         category="pantry",
         canonical_text=product_name,
+        size_is_capacity=size_is_capacity,
         needs_review=False,
     )
 
@@ -129,6 +131,48 @@ class UnitItemTests(unittest.TestCase):
                                 unit_price=1.50, line_total=1.50)
         self.assertFalse(result.is_comparable)
         self.assertIn("not an amount", result.note)
+
+
+class CapacityVersusQuantityTests(unittest.TestCase):
+    """A size can describe the object or say how much you got.
+
+    Same units, opposite meanings. `BOURBON ROCKS 12.25Z` is a tumbler
+    that HOLDS 12.25 oz -- you buy one glass and consume no glass at all.
+    `SWAD PANEER 14oz` is 14 oz of paneer you eat.
+
+    Getting this wrong produces arithmetic that is perfectly valid and
+    completely meaningless, which nothing downstream can detect: $1.96
+    per pound of drinking glass looks like a number.
+    """
+
+    def test_a_tumbler_is_priced_per_item_not_per_pound(self):
+        result = normalize_line(
+            product(12.25, "oz", size_is_capacity=True, product_name="rocks glass"),
+            quantity=1, unit_price=1.50, line_total=1.50)
+        self.assertEqual(result.dimension, COUNT)
+        self.assertAlmostEqual(result.price_per_display, 1.50)
+        self.assertEqual(result.display_unit, "each")
+
+    def test_a_storage_tote_is_priced_per_item_not_per_gallon(self):
+        result = normalize_line(
+            product(10, "gal", size_is_capacity=True, product_name="storage tote"),
+            quantity=1, unit_price=9.98, line_total=9.98)
+        self.assertEqual(result.dimension, COUNT)
+        self.assertAlmostEqual(result.price_per_display, 9.98)
+
+    def test_the_same_unit_still_works_for_actual_contents(self):
+        # 14 oz of paneer really is 14 oz of paneer.
+        result = normalize_line(
+            product(14, "oz", size_is_capacity=False, product_name="paneer"),
+            quantity=2, unit_price=5.99, line_total=11.98)
+        self.assertEqual(result.dimension, WEIGHT)
+        self.assertAlmostEqual(result.price_per_display, 11.98 / (28 / 16), places=2)
+
+    def test_the_reason_is_recorded_on_the_result(self):
+        result = normalize_line(
+            product(12.25, "oz", size_is_capacity=True), quantity=1,
+            unit_price=1.50, line_total=1.50)
+        self.assertIn("not how much you got", result.note)
 
 
 class DisplayHelperTests(unittest.TestCase):

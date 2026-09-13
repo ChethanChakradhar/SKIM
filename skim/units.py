@@ -304,6 +304,25 @@ def _normalize_unit_item(
     """
     count = quantity if quantity else 1.0
 
+    # A size that describes the object is not an amount you bought. A
+    # 12.25 oz tumbler is one glass, not 347 grams of glassware; a 10
+    # gallon tote is one tote, not ten gallons of tote. Dividing the
+    # price by that capacity produces a confident number meaning nothing
+    # -- and nothing downstream could ever detect it, because the
+    # arithmetic is perfectly valid. Only the premise is wrong.
+    #
+    # These are priced per item, which is the honest comparable: one
+    # storage tote against another storage tote.
+    if getattr(parsed, "size_is_capacity", False):
+        if line_total is not None:
+            return _with_display(NormalizedPrice(
+                COUNT, "each", count, line_total / count, "unit",
+                note=f"{parsed.size_value:g}{parsed.size_unit} is the size of "
+                     "the thing, not how much you got -- priced per item",
+            ), "each")
+        return NormalizedPrice(None, None, None, None, "unit",
+                               note="size describes the object; no line total")
+
     if parsed.size_unit is None or parsed.size_value is None:
         # Countable goods with no printed size are still comparable as
         # a price per item -- a rat trap is a rat trap.
