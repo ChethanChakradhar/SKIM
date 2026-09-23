@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import logging
 import os
 import secrets
 import shutil
@@ -104,6 +105,10 @@ MAX_UPLOAD_BYTES = 25_000_000
 # and inventing a permissions system for one person is how simple things
 # stop being simple.
 ADMIN_NAME = (os.getenv("SKIM_ADMIN") or "").strip().lower()
+
+logging.basicConfig(level=logging.INFO,
+                    format="%(asctime)s %(levelname)s %(message)s")
+log = logging.getLogger("skim")
 
 app = FastAPI(title="Skim")
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
@@ -180,6 +185,7 @@ def enrich_receipt(receipt_id: int, store: Optional[str]) -> None:
     ones are nearly free -- a store prints the same strings every time.
     """
     _enriching.add(receipt_id)
+    log.info("enrich: starting receipt %s (%s)", receipt_id, store)
     connection = db()
     try:
         cache = ProductCache(DATA_DIR / "processed" / "product_cache.json")
@@ -227,6 +233,13 @@ def enrich_receipt(receipt_id: int, store: Optional[str]) -> None:
             storage.save_alias(connection, store, description, decision.product_id,
                                parsed, parsed.needs_review)
         connection.commit()
+        log.info("enrich: finished receipt %s", receipt_id)
+    except Exception:
+        # Without this the job dies silently and the lines stay unmatched
+        # forever with no record of why. Everything else in this pipeline
+        # fails loudly; background work should not be the exception.
+        log.exception("enrich: FAILED on receipt %s", receipt_id)
+        raise
     finally:
         connection.close()
         _enriching.discard(receipt_id)
@@ -425,8 +438,8 @@ def _error_redirect(message: str) -> RedirectResponse:
 
 
 @app.get("/receipt/{receipt_id}", response_class=HTMLResponse)
-def receipt_detail(request: Request, receipt_id: int,
-                   background: BackgroundTasks = None):
+def receipt_detail(request: Request, background: BackgroundTasks,
+                   receipt_id: int):
     connection = db()
     try:
         shopper = current_shopper(request, connection)
@@ -460,7 +473,14 @@ def receipt_detail(request: Request, receipt_id: int,
 
         # Self-healing: if lines are still unmatched, the job either is
         # running or was killed. Scheduling it again is safe and cheap.
-        if pending and background is not None:
+        #
+        # `background` is a required parameter, not an optional one with a
+        # `is not None` guard. That guard was here, and it turned a
+        # dependency that was not being injected into silence -- eight
+        # lines sat unmatched through six page loads with no error
+        # anywhere. A missing dependency should crash loudly on the first
+        # request, not quietly do nothing forever.
+        if pending:
             enrich_if_stalled(receipt_id, receipt["merchant_name"], background)
 
         return templates.TemplateResponse("receipt.html", {

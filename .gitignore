@@ -22,3 +22,4 @@ data/processed/*
 
 # Test-generated fixture images
 tests/_tmp_capture_test/
+CLAUDE.md
